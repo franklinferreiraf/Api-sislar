@@ -46,3 +46,4 @@ Cada rota exige a permissão do perfil (os mesmos códigos do protótipo). Admin
 Evolução finalizada não é editada: a correção grava o texto anterior e o motivo. O saldo do lote só muda por movimentação. Lote vencido não é dispensado. Prescrição ativa do mesmo medicamento não se repete para o idoso. Leitura fora da faixa abre ocorrência (`aberta`, depois `reconhecida`, depois `resolvida`).
 
 `npm test` recria o banco `sislar_test`.
+
