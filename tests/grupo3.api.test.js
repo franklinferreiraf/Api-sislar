@@ -73,7 +73,11 @@ describe("grupo3 · documentação", () => {
     assert.equal(spec.paths["/api/agenda"].post.deprecated, true);
     assert.equal(spec.paths["/api/atendimentos"].post.deprecated, true);
     assert.equal(spec.paths["/api/funcionarios"].get.deprecated, true);
-    for (const rota of ["/api/agendas/farmacia", "/api/agendas/cuidados-pessoais", "/api/idosos/{idosoId}/cuidados-pessoais", "/api/agendamentos/{id}/lembretes"]) {
+    for (const rota of [
+      "/api/agendas/farmacia", "/api/agendas/cuidados-pessoais", "/api/idosos/{idosoId}/cuidados-pessoais",
+      "/api/agendamentos/{id}/lembretes", "/api/escalas", "/api/escalas/lacunas", "/api/escalas/cobertura-necessaria",
+      "/api/presencas", "/api/colaboradores/{id}/disponibilidades",
+    ]) {
       assert.ok(spec.paths[rota]?.get, rota);
     }
   });
@@ -571,5 +575,290 @@ describe("grupo3 · lembretes — regras de início e destinatário", () => {
     const [item] = await lembretes("recepcao", proximo.body.id);
     assert.equal(item.status, "cancelado");
     assert.match(item.ultimoErro, /já iniciado/);
+  });
+});
+
+// ---------------- Fatia 3 ----------------
+
+const EMAILS_EXTRAS = { enfermagem: "carla.nunes@lardoirmaovelho.example" };
+Object.assign(EMAILS, EMAILS_EXTRAS);
+
+const put = async (perfil, url, body) => request(app).put(url).set(await como(perfil)).send(body);
+const patch = async (perfil, url, body) => request(app).patch(url).set(await como(perfil)).send(body);
+const hojeInstituicao = () => new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo" }).format(new Date());
+
+describe("grupo3 · cadastro da equipe (US-091, US-092, US-082)", () => {
+  it("cadastra funcionário com cargo, setor, contatos e especialidade, sem pedir documento", async () => {
+    const criado = await post("gestor", "/api/colaboradores", {
+      nome: "Marina Lopes", vinculo: "funcionario", cargo: "Cuidadora de idosos", setor: "Cuidados diários",
+      email: "Marina.Lopes@lardoirmaovelho.example", telefone: "(11) 91234-5678", cpf: "000.000.000-00",
+    });
+    assert.equal(criado.status, 201);
+    assert.equal(criado.body.cargo, "Cuidadora de idosos");
+    assert.equal(criado.body.setor, "Cuidados diários");
+    assert.equal(criado.body.email, "marina.lopes@lardoirmaovelho.example");
+    assert.equal(criado.body.status, "ativo");
+    assert.equal("cpf" in criado.body, false);
+    const coluna = await prisma.$queryRaw`
+      SELECT count(*)::int AS total FROM information_schema.columns
+      WHERE table_schema = 'grupo3' AND table_name = 'colaborador' AND column_name IN ('cpf', 'documento', 'rg')
+    `;
+    assert.equal(coluna[0].total, 0);
+  });
+
+  it("cadastra médico voluntário com especialidade e filtra por vínculo e especialidade", async () => {
+    const criado = await post("gestor", "/api/colaboradores", {
+      nome: "Dr. Caio Ribeiro", vinculo: "voluntario", especialidade: "clinica_medica", registroProfissional: "CRM-SP 000.222 (fictício)",
+    });
+    assert.equal(criado.status, 201);
+    const clinicos = await get("gestor", "/api/colaboradores?especialidade=clinica_medica&vinculo=voluntario&limit=100");
+    const nomes = clinicos.body.data.map((item) => item.nome);
+    assert.ok(nomes.includes("Dr. Caio Ribeiro"));
+    assert.ok(nomes.includes("Dra. Sônia Campos"));
+    assert.ok(clinicos.body.data.every((item) => item.vinculo === "voluntario" && item.especialidade === "clinica_medica"));
+  });
+
+  it("valida especialidade, e-mail e telefone", async () => {
+    assert.equal((await post("gestor", "/api/colaboradores", { nome: "Fulano", vinculo: "externo", especialidade: "Clínica Médica" })).status, 422);
+    assert.equal((await post("gestor", "/api/colaboradores", { nome: "Fulano", vinculo: "externo", email: "sem-arroba" })).status, 422);
+    assert.equal((await post("gestor", "/api/colaboradores", { nome: "Fulano", vinculo: "externo", telefone: "abc" })).status, 422);
+  });
+
+  it("contatos só aparecem com equipe.visualizar", async () => {
+    const recepcao = await get("recepcao", "/api/colaboradores?q=Paulo");
+    assert.equal(recepcao.status, 200);
+    const paulo = recepcao.body.data.find((item) => item.nome === "Dr. Paulo Ferraz Neto");
+    assert.equal(paulo.telefone, null);
+    assert.equal(paulo.email, null);
+    assert.equal(paulo.contatosRestritos, true);
+    assert.equal(paulo.cargo, "Médico geriatra");
+    const enfermagem = await get("enfermagem", "/api/colaboradores?q=Paulo");
+    assert.equal(enfermagem.body.data.find((item) => item.nome === "Dr. Paulo Ferraz Neto").telefone, "(11) 90000-0005");
+    const detalhe = await get("recepcao", `/api/colaboradores/${paulo.id}`);
+    assert.equal(detalhe.body.telefone, null);
+  });
+
+  it("disponibilidade substitui a lista e recusa sobreposição", async () => {
+    const id = (await post("gestor", "/api/colaboradores", { nome: "Voluntário de disponibilidade", vinculo: "voluntario" })).body.id;
+    const url = `/api/colaboradores/${id}/disponibilidades`;
+    const sobreposta = await put("gestor", url, { disponibilidades: [
+      { diaSemana: 2, horaInicio: "08:00", horaFim: "12:00" }, { diaSemana: 2, horaInicio: "11:00", horaFim: "13:00" },
+    ] });
+    assert.equal(sobreposta.status, 422);
+    const ok = await put("gestor", url, { disponibilidades: [
+      { diaSemana: 4, horaInicio: "14:00", horaFim: "17:00" }, { diaSemana: 2, horaInicio: "08:00", horaFim: "12:00", observacao: "Só manhã" },
+    ] });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(ok.body.data.map((d) => [d.diaSemana, d.horaInicio, d.horaFim]), [[2, "08:00", "12:00"], [4, "14:00", "17:00"]]);
+    const troca = await put("gestor", url, { disponibilidades: [{ diaSemana: 5, horaInicio: "09:00", horaFim: "10:00" }] });
+    assert.equal(troca.body.data.length, 1);
+    assert.equal((await get("recepcao", url)).status, 200);
+    assert.equal((await put("recepcao", url, { disponibilidades: [] })).status, 403);
+    assert.equal((await put("gestor", url, { disponibilidades: [{ diaSemana: 8, horaInicio: "09:00", horaFim: "10:00" }] })).status, 422);
+  });
+});
+
+describe("grupo3 · escalas (US-083)", () => {
+  let medica;
+
+  before(async () => {
+    medica = (await post("gestor", "/api/colaboradores", {
+      nome: "Dra. Escala de Teste", vinculo: "voluntario", especialidade: "geriatria",
+    })).body.id;
+    await put("gestor", `/api/colaboradores/${medica}/disponibilidades`, {
+      disponibilidades: [{ diaSemana: 2, horaInicio: "08:00", horaFim: "12:00" }],
+    });
+  });
+
+  const escalar = (perfil, extra) => post(perfil, "/api/escalas", {
+    colaboradorId: medica, local: "Consultório 2", data: "2030-06-04", horaInicio: "08:00", horaFim: "12:00", ...extra,
+  });
+
+  it("cria escala com profissional, local, data, horário e situação; herda a especialidade", async () => {
+    const criada = await escalar("gestor");
+    assert.equal(criada.status, 201);
+    assert.equal(criada.body.especialidade, "geriatria");
+    assert.equal(criada.body.situacao, "prevista");
+    assert.equal(criada.body.horaInicio, "08:00");
+    assert.deepEqual(criada.body.avisos, []);
+  });
+
+  it("recusa sobreposição do mesmo profissional e avisa fora da disponibilidade", async () => {
+    const sobreposta = await escalar("gestor", { horaInicio: "11:00", horaFim: "13:00" });
+    assert.equal(sobreposta.status, 409);
+    assert.equal(sobreposta.body.error.details.conflitos.length, 1);
+    const tarde = await escalar("gestor", { horaInicio: "12:00", horaFim: "14:00" });
+    assert.equal(tarde.status, 201);
+    assert.equal(tarde.body.avisos[0].codigo, "fora_da_disponibilidade");
+  });
+
+  it("duas gravações simultâneas no mesmo turno: só uma passa", async () => {
+    const respostas = await Promise.all([
+      escalar("gestor", { data: "2030-06-11" }),
+      escalar("gestor", { data: "2030-06-11", local: "Consultório 3" }),
+    ]);
+    assert.deepEqual(respostas.map((r) => r.status).sort(), [201, 409]);
+  });
+
+  it("cancelada libera o horário e não volta a ser alterada", async () => {
+    const criada = await escalar("gestor", { data: "2030-06-18" });
+    const cancelada = await patch("gestor", `/api/escalas/${criada.body.id}/situacao`, { situacao: "cancelada", motivo: "Viagem" });
+    assert.equal(cancelada.status, 200);
+    assert.equal(cancelada.body.motivoCancelamento, "Viagem");
+    assert.equal((await escalar("gestor", { data: "2030-06-18" })).status, 201);
+    assert.equal((await patch("gestor", `/api/escalas/${criada.body.id}/situacao`, { situacao: "confirmada" })).status, 409);
+    assert.equal((await put("gestor", `/api/escalas/${criada.body.id}`, {
+      colaboradorId: medica, local: "X1", data: "2030-06-18", horaInicio: "14:00", horaFim: "15:00",
+    })).status, 409);
+    await assert.rejects(prisma.$executeRaw`DELETE FROM grupo3.escala WHERE id = ${criada.body.id}::uuid`);
+  });
+
+  it("lista por período e filtros; permissões de leitura e escrita", async () => {
+    const lista = await get("recepcao", `/api/escalas?inicio=2030-06-04&fim=2030-06-04&colaboradorId=${medica}`);
+    assert.equal(lista.status, 200);
+    assert.equal(lista.body.data.length, 2);
+    assert.equal((await get("recepcao", "/api/escalas?inicio=2030-06-10&fim=2030-06-01")).status, 422);
+    assert.equal((await get("recepcao", "/api/escalas?inicio=2030-01-01&fim=2030-06-01")).status, 422);
+    assert.equal((await escalar("recepcao", { data: "2030-06-25" })).status, 403);
+    assert.equal((await get("voluntaria", "/api/escalas")).status, 403);
+    const inativo = (await post("gestor", "/api/colaboradores", { nome: "Inativo da escala", vinculo: "externo" })).body.id;
+    await patch("gestor", `/api/colaboradores/${inativo}/status`, { status: "inativo" });
+    assert.equal((await escalar("gestor", { colaboradorId: inativo, data: "2030-06-25" })).status, 422);
+  });
+});
+
+describe("grupo3 · cobertura e lacunas (US-084)", () => {
+  let original;
+
+  before(async () => {
+    original = (await get("gestor", "/api/escalas/cobertura-necessaria")).body.data
+      .map(({ id, ...resto }) => resto);
+  });
+
+  it("só a administração da equipe configura a cobertura; recusa faixa sobreposta", async () => {
+    assert.equal((await put("enfermagem", "/api/escalas/cobertura-necessaria", { coberturas: [] })).status, 403);
+    const sobreposta = await put("gestor", "/api/escalas/cobertura-necessaria", { coberturas: [
+      { especialidade: "area_teste", diaSemana: 3, horaInicio: "08:00", horaFim: "12:00", quantidadeMinima: 1 },
+      { especialidade: "area_teste", diaSemana: 3, horaInicio: "11:00", horaFim: "13:00", quantidadeMinima: 1 },
+    ] });
+    assert.equal(sobreposta.status, 422);
+  });
+
+  it("aponta os períodos abaixo do mínimo na especialidade", async () => {
+    const config = await put("gestor", "/api/escalas/cobertura-necessaria", { coberturas: [
+      ...original,
+      { especialidade: "area_teste", diaSemana: 3, horaInicio: "08:00", horaFim: "12:00", quantidadeMinima: 2 },
+    ] });
+    assert.equal(config.status, 200);
+    const a = (await post("gestor", "/api/colaboradores", { nome: "Área teste A", vinculo: "funcionario", especialidade: "area_teste" })).body.id;
+    const b = (await post("gestor", "/api/colaboradores", { nome: "Área teste B", vinculo: "funcionario", especialidade: "area_teste" })).body.id;
+    await post("gestor", "/api/escalas", { colaboradorId: a, local: "Sala", data: "2030-06-05", horaInicio: "08:00", horaFim: "10:00" });
+    await post("gestor", "/api/escalas", { colaboradorId: b, local: "Sala", data: "2030-06-05", horaInicio: "09:00", horaFim: "12:00" });
+
+    const lacunas = await get("recepcao", "/api/escalas/lacunas?inicio=2030-06-05&fim=2030-06-05&especialidade=area_teste");
+    assert.equal(lacunas.status, 200);
+    assert.deepEqual(lacunas.body.data, [
+      { data: "2030-06-05", diaSemana: 3, especialidade: "area_teste", inicio: "08:00", fim: "09:00", necessario: 2, escalados: 1, faltam: 1 },
+      { data: "2030-06-05", diaSemana: 3, especialidade: "area_teste", inicio: "10:00", fim: "12:00", necessario: 2, escalados: 1, faltam: 1 },
+    ]);
+    const semana = await get("recepcao", "/api/escalas/lacunas?inicio=2030-06-03&fim=2030-06-09&especialidade=area_teste");
+    assert.equal(semana.body.data.length, 2);
+    assert.equal(semana.body.resumo.profissionaisFaltando, 2);
+    assert.equal((await get("voluntaria", "/api/escalas/lacunas")).status, 403);
+  });
+
+  it("escala cancelada e colaborador inativo não cobrem a necessidade", async () => {
+    const c = (await post("gestor", "/api/colaboradores", { nome: "Área teste C", vinculo: "funcionario", especialidade: "area_teste" })).body.id;
+    const e = await post("gestor", "/api/escalas", { colaboradorId: c, local: "Sala", data: "2030-06-12", horaInicio: "08:00", horaFim: "12:00" });
+    const d = (await post("gestor", "/api/colaboradores", { nome: "Área teste D", vinculo: "funcionario", especialidade: "area_teste" })).body.id;
+    await post("gestor", "/api/escalas", { colaboradorId: d, local: "Sala", data: "2030-06-12", horaInicio: "08:00", horaFim: "12:00" });
+    let lacunas = await get("gestor", "/api/escalas/lacunas?inicio=2030-06-12&fim=2030-06-12&especialidade=area_teste");
+    assert.equal(lacunas.body.data.length, 0);
+    await patch("gestor", `/api/escalas/${e.body.id}/situacao`, { situacao: "cancelada" });
+    await patch("gestor", `/api/colaboradores/${d}/status`, { status: "inativo" });
+    lacunas = await get("gestor", "/api/escalas/lacunas?inicio=2030-06-12&fim=2030-06-12&especialidade=area_teste");
+    assert.deepEqual(lacunas.body.data.map((l) => [l.inicio, l.fim, l.escalados]), [["08:00", "12:00", 0]]);
+  });
+});
+
+describe("grupo3 · presença (US-093) separada da escala", () => {
+  let colaborador;
+  let escalaHoje;
+  const hoje = hojeInstituicao();
+
+  before(async () => {
+    colaborador = (await post("gestor", "/api/colaboradores", { nome: "Plantonista de teste", vinculo: "funcionario" })).body.id;
+    escalaHoje = (await post("gestor", "/api/escalas", {
+      colaboradorId: colaborador, local: "Ala A", data: hoje, horaInicio: "00:10", horaFim: "00:50",
+    })).body.id;
+  });
+
+  it("registra presença ligada ao turno previsto, uma vez por escala", async () => {
+    const presenca = await post("gestor", "/api/presencas", {
+      colaboradorId: colaborador, data: hoje, horaEntrada: "00:15", escalaId: escalaHoje, atividade: "Plantão",
+    });
+    assert.equal(presenca.status, 201);
+    assert.equal(presenca.body.emAndamento, true);
+    assert.equal(presenca.body.escalaId, escalaHoje);
+    assert.equal(presenca.body.registradoPor.id, "s02");
+    assert.equal((await post("gestor", "/api/presencas", {
+      colaboradorId: colaborador, data: hoje, horaEntrada: "00:20", escalaId: escalaHoje,
+    })).status, 409);
+    assert.equal((await post("gestor", "/api/presencas", { colaboradorId: colaborador, data: hoje, horaEntrada: "02:00" })).status, 409);
+    const saida = await patch("gestor", `/api/presencas/${presenca.body.id}/saida`, { horaSaida: "00:55" });
+    assert.equal(saida.status, 200);
+    assert.equal(saida.body.horaSaida, "00:55");
+    assert.equal(saida.body.emAndamento, false);
+    assert.equal((await patch("gestor", `/api/presencas/${presenca.body.id}/saida`, { horaSaida: "01:00" })).status, 409);
+  });
+
+  it("cancelar a escala não apaga a presença registrada", async () => {
+    await patch("gestor", `/api/escalas/${escalaHoje}/situacao`, { situacao: "cancelada", motivo: "Erro de lançamento" });
+    const lista = await get("gestor", `/api/presencas?data=${hoje}&colaboradorId=${colaborador}`);
+    assert.equal(lista.body.data.length, 1);
+    assert.equal(lista.body.data[0].escalaId, escalaHoje);
+  });
+
+  it("valida data futura, ausência e escala de outra pessoa", async () => {
+    assert.equal((await post("gestor", "/api/presencas", { colaboradorId: colaborador, data: "2030-01-01", horaEntrada: "08:00" })).status, 422);
+    assert.equal((await post("gestor", "/api/presencas", { colaboradorId: colaborador, data: hoje })).status, 422);
+    assert.equal((await post("gestor", "/api/presencas", { colaboradorId: colaborador, data: hoje, situacao: "ausente", horaEntrada: "08:00" })).status, 422);
+    const ausente = await post("gestor", "/api/presencas", { colaboradorId: colaborador, data: "2025-01-02", situacao: "ausente", justificativa: "Atestado" });
+    assert.equal(ausente.status, 201);
+    assert.equal(ausente.body.emAndamento, false);
+    const outraPessoa = (await post("gestor", "/api/colaboradores", { nome: "Outro plantonista", vinculo: "funcionario" })).body.id;
+    const escalaAlheia = await post("gestor", "/api/escalas", {
+      colaboradorId: outraPessoa, local: "Ala B", data: hoje, horaInicio: "00:10", horaFim: "00:40",
+    });
+    assert.equal(escalaAlheia.status, 201);
+    const recusa = await post("gestor", "/api/presencas", {
+      colaboradorId: colaborador, data: hoje, situacao: "ausente", justificativa: "Teste", escalaId: escalaAlheia.body.id,
+    });
+    assert.equal(recusa.status, 422);
+    assert.match(recusa.body.error.details[0].message, /mesmo colaborador/);
+  });
+
+  it("filtra quem está trabalhando por data, vínculo e em andamento", async () => {
+    const agora = await get("gestor", `/api/presencas?data=${hoje}&emAndamento=true`);
+    assert.equal(agora.status, 200);
+    assert.ok(agora.body.data.every((item) => item.emAndamento));
+    assert.ok(agora.body.data.some((item) => item.colaborador.nome === "Carla Beatriz Nunes"));
+    const voluntarios = await get("gestor", `/api/presencas?data=${hoje}&vinculo=voluntario`);
+    assert.ok(voluntarios.body.data.every((item) => item.colaborador.vinculo === "voluntario"));
+    assert.ok(voluntarios.body.data.some((item) => item.colaborador.nome === "Helena Duarte"));
+  });
+
+  it("permissões: equipe.visualizar lê, só a gestão registra", async () => {
+    assert.equal((await get("enfermagem", `/api/presencas?data=${hoje}`)).status, 200);
+    assert.equal((await get("recepcao", `/api/presencas?data=${hoje}`)).status, 403);
+    assert.equal((await post("enfermagem", "/api/presencas", { colaboradorId: colaborador, data: hoje, horaEntrada: "03:00" })).status, 403);
+  });
+
+  it("escala e presença ficam em tabelas separadas", async () => {
+    const tabelas = await prisma.$queryRaw`
+      SELECT table_name FROM information_schema.tables
+      WHERE table_schema = 'grupo3' AND table_name IN ('escala', 'presenca') ORDER BY table_name
+    `;
+    assert.deepEqual(tabelas.map((t) => t.table_name), ["escala", "presenca"]);
   });
 });

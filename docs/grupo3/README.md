@@ -6,7 +6,7 @@ Backend dos épicos E07 (agenda, cuidados e atendimentos), E08 (fisioterapia), E
 |---|---|---|
 | 1 | `Colaborador` mínimo, US-065, US-066, US-067, US-068, US-069, US-072, US-073 | **Entregue** |
 | 2 | US-070, US-071, US-074 (lembretes + job) | **Entregue** |
-| 3 | US-091, US-092, US-082, US-083, US-084, US-093 | A fazer |
+| 3 | US-091, US-092, US-082, US-083, US-084, US-093 | **Entregue** |
 | 4 | US-085 a US-089 | A fazer |
 | 5 | US-075 a US-080 | A fazer |
 | 6 | US-094 a US-096 + indicadores para o Grupo 5 | A fazer |
@@ -49,14 +49,14 @@ Também dá para gravar `DATABASE_URL` no `.env`; uma variável já definida no 
 | `src/grupo3/portas/` | Portas de integração (`idosos.js`, `prontuario.js`, `notificacoes.js`) |
 | `src/grupo3/lembretes.js` | Geração, cancelamento e envio dos lembretes (US-074) |
 | `src/grupo3/jobs.js` | Agendador dos jobs (`JOBS_ENABLED=true`), chamado por `src/server.js` |
-| `src/routes/grupo3/` | Rotas, montadas em `/api` por `index.js` |
+| `src/routes/grupo3/` | Rotas, montadas em `/api` por `index.js` (`agendamentos`, `tipos-atendimento`, `colaboradores`, `escalas`, `presencas`) |
 | `src/docs/openapi.grupo3.js` | OpenAPI do G3, juntado em `src/docs/openapi.js` |
 | `src/db/seedGrupo3.js` | Dados de demonstração |
 | `tests/grupo3.rules.test.js`, `tests/grupo3.api.test.js` | Testes unitários, de integração e de permissão |
 
 Segue a stack e as convenções do repositório: Express, SQL puro via Prisma (`$queryRaw`), zod, `node:test` + supertest com banco real (`sislar_test`), erro no formato `{ "error": { "message", "details" } }`.
 
-## Modelo de dados (Fatia 1)
+## Modelo de dados
 
 Idoso e usuário entram como UUID (`patients.ref`, `users.ref`), no mesmo padrão do Grupo 2, sem FK entre schemas. A API valida esses UUIDs pela porta de integração.
 
@@ -68,6 +68,10 @@ erDiagram
     AGENDAMENTO ||--o{ HISTORICO_AGENDAMENTO : "trilha"
     AGENDAMENTO ||--o{ LEMBRETE_AGENDAMENTO : "lembretes"
     COLABORADOR ||--o{ LEMBRETE_AGENDAMENTO : "destinatário"
+    COLABORADOR ||--o{ DISPONIBILIDADE_COLABORADOR : "declara"
+    COLABORADOR ||--o{ ESCALA : "planejado"
+    COLABORADOR ||--o{ PRESENCA : "aconteceu"
+    ESCALA |o--o| PRESENCA : "turno previsto (opcional)"
     USERS_public ||--o| COLABORADOR : "usuario_ref (opcional)"
     PATIENTS_public ||--o{ AGENDAMENTO : "idoso_ref"
 
@@ -76,7 +80,51 @@ erDiagram
         text nome
         enum vinculo "funcionario | voluntario | externo"
         enum status "ativo | inativo"
+        text cargo
+        text setor
+        text especialidade "slug, chave da cobertura"
+        text registro_profissional
+        text email "só com equipe.visualizar"
+        text telefone "só com equipe.visualizar"
         uuid usuario_ref UK "users.ref, opcional"
+    }
+    DISPONIBILIDADE_COLABORADOR {
+        uuid id PK
+        uuid colaborador_id FK
+        smallint dia_semana "ISO 1 a 7"
+        time hora_inicio
+        time hora_fim
+    }
+    ESCALA {
+        uuid id PK
+        uuid colaborador_id FK
+        text especialidade
+        text local
+        date data
+        time hora_inicio
+        time hora_fim
+        enum situacao "prevista | confirmada | cancelada"
+        text motivo_cancelamento
+    }
+    COBERTURA_NECESSARIA {
+        uuid id PK
+        text especialidade
+        smallint dia_semana
+        time hora_inicio
+        time hora_fim
+        smallint quantidade_minima
+    }
+    PRESENCA {
+        uuid id PK
+        uuid colaborador_id FK
+        uuid escala_id FK "opcional, única"
+        date data
+        enum situacao "presente | ausente"
+        time hora_entrada
+        time hora_saida
+        text atividade
+        text justificativa
+        uuid registrado_por_ref
     }
     TIPO_ATENDIMENTO {
         uuid id PK
@@ -157,9 +205,15 @@ Integridade garantida no banco:
 
 **Lembretes (US-074).** Ao agendar, o G3 cria um lembrete para o profissional em cada antecedência configurada: no tipo (`antecedencias_lembrete_min`) ou, se o tipo não define, no padrão da instituição (`grupo3.configuracao`, `lembretes.antecedencias_min`, 24 h). Antecedências que já passaram viram um único envio imediato; agendamento com início no passado não gera lembrete, nem o imediato. Se o job encontrar um lembrete pendente cujo atendimento já começou (ex.: job parado), ele é cancelado com `ultimoErro` em vez de enviado. Se o colaborador não tem usuário vinculado, o lembrete nasce como `sem_destinatario`; quando o usuário é vinculado, só os lembretes de agendamentos ainda `agendado` e com início no futuro voltam para `pendente`. Reagendar, inclusive com troca de profissional, cancela os lembretes pendentes e gera novos para o profissional atual; o reagendamento é o único caminho que troca o profissional de um agendamento. Cancelar ou registrar a realização cancela os pendentes. O job `processarLembretes` (a cada `JOBS_INTERVALO_SEG`, com `JOBS_ENABLED=true`) envia os vencidos pela porta de notificações, com `FOR UPDATE SKIP LOCKED`: o canal interno grava em `public.notifications` e marca `entregue`. Uma falha volta para a fila até `lembretes.max_tentativas` (3) e então vira `falha`, com o erro em `ultimoErro`. A mensagem leva tipo, idoso, data/hora e local, sem observações clínicas.
 
+**Equipe (US-082, US-091, US-092).** Cadastro único de colaboradores: vínculo (`funcionario`, `voluntario`, `externo`), cargo, setor, status, especialidade (slug), registro profissional, contatos (e-mail e telefone) e usuário do sistema opcional. Não há CPF nem documento, porque não há uso definido para eles. Contatos só aparecem para quem tem `equipe.visualizar`; os demais recebem `email` e `telefone` como `null`, com `contatosRestritos: true`. A disponibilidade semanal é declarada por dia ISO (1 = segunda) e substituída inteira por `PUT`.
+
+**Escala x presença (US-083, US-093).** São tabelas separadas. A **escala** é o planejado: colaborador, especialidade, local, data, horário e situação (`prevista`, `confirmada`, `cancelada`). O mesmo colaborador não pode ter turnos sobrepostos não cancelados (lock por colaborador + restrição de exclusão `btree_gist` no banco). Turno fora da disponibilidade declarada é aceito com aviso em `avisos`. A **presença** é o que aconteceu: entrada/saída ou ausência com justificativa, por data, opcionalmente ligada ao turno previsto (uma presença por escala, mesmo colaborador e data). Cancelar uma escala não apaga a presença registrada. Presença só para hoje ou passado.
+
+**Lacunas (US-084).** A cobertura mínima (`cobertura_necessaria`) é configurada por especialidade, dia da semana e faixa horária. `GET /api/escalas/lacunas` cruza essa necessidade com as escalas `prevista`/`confirmada` de colaboradores ativos da mesma especialidade e devolve os trechos abaixo do mínimo, com quantos estão escalados e quantos faltam.
+
 **LGPD.** Nas categorias clínicas (consultas, avaliação e fisioterapia), `observacoes`, `motivoStatus` e `observacaoRealizacao` voltam `null`, com `conteudoRestrito: true`, para quem não tem `atendimento-clinico.visualizar` (consultas e avaliação) ou `fisioterapia.visualizar`. A exceção é o próprio profissional do agendamento. A trilha de histórico aplica a mesma regra.
 
-## Endpoints (Fatia 1)
+## Endpoints
 
 A documentação completa, com exemplos e erros, está em `/api/docs`.
 
@@ -170,10 +224,10 @@ A documentação completa, com exemplos e erros, está em `/api/docs`.
 | `POST /api/tipos-atendimento` | `agenda.administrar` | 065 |
 | `PUT /api/tipos-atendimento/{id}` | `agenda.administrar` | 065 |
 | `PATCH /api/tipos-atendimento/{id}/status` | `agenda.administrar` | 065 |
-| `GET /api/colaboradores` · `GET /api/colaboradores/{id}` | `equipe.visualizar`, `agenda.criar` ou `agenda.editar` | — |
-| `POST /api/colaboradores` | `equipe.criar` | — |
-| `PUT /api/colaboradores/{id}` | `equipe.editar` | — |
-| `PATCH /api/colaboradores/{id}/status` | `equipe.excluir` | — |
+| `GET /api/colaboradores?vinculo&status&setor&especialidade&q` · `GET /api/colaboradores/{id}` | `equipe.visualizar`, `agenda.criar` ou `agenda.editar` (contatos só com `equipe.visualizar`) | 082, 091, 092 |
+| `POST /api/colaboradores` | `equipe.criar` | 082, 091, 092 |
+| `PUT /api/colaboradores/{id}` | `equipe.editar` | 082, 091, 092 |
+| `PATCH /api/colaboradores/{id}/status` | `equipe.excluir` | 091, 092 |
 | `GET /api/agendamentos` | `agenda.visualizar` | 066 |
 | `POST /api/agendamentos/verificar-conflitos` | `agenda.criar` ou `agenda.editar` | 073 |
 | `POST /api/agendamentos` | `agenda.criar` | 067, 073 |
@@ -190,6 +244,19 @@ A documentação completa, com exemplos e erros, está em `/api/docs`.
 | `GET /api/agendas/cuidados-pessoais?visao=&data=&profissionalId=&janelaInicio=&janelaFim=` | `agenda.visualizar` | 071 |
 | `GET /api/idosos/{idosoId}/cuidados-pessoais` | `agenda.visualizar` | 071 |
 | `GET /api/agendamentos/{id}/lembretes` | `agenda.visualizar` ou ser o profissional | 074 |
+| `GET /api/colaboradores/{id}/disponibilidades` | `equipe.visualizar`, `agenda.criar` ou `agenda.editar` | 082, 092 |
+| `PUT /api/colaboradores/{id}/disponibilidades` | `equipe.editar` | 082, 092 |
+| `GET /api/escalas?inicio&fim&colaboradorId&especialidade&situacao&local` | `equipe.visualizar`, `agenda.visualizar` ou `atendimento-clinico.visualizar` | 083 |
+| `GET /api/escalas/{id}` | idem | 083 |
+| `POST /api/escalas` | `equipe.criar` | 083 |
+| `PUT /api/escalas/{id}` | `equipe.editar` | 083 |
+| `PATCH /api/escalas/{id}/situacao` | `equipe.editar` | 083 |
+| `GET /api/escalas/cobertura-necessaria` | `equipe.visualizar`, `agenda.visualizar` ou `atendimento-clinico.visualizar` | 084 |
+| `PUT /api/escalas/cobertura-necessaria` | `equipe.administrar` | 084 |
+| `GET /api/escalas/lacunas?inicio&fim&especialidade` | `equipe.visualizar`, `agenda.visualizar` ou `atendimento-clinico.visualizar` | 084 |
+| `GET /api/presencas?data&inicio&fim&colaboradorId&vinculo&situacao&emAndamento` | `equipe.visualizar` | 093 |
+| `POST /api/presencas` | `equipe.criar` | 093 |
+| `PATCH /api/presencas/{id}/saida` | `equipe.criar` ou `equipe.editar` | 093 |
 
 Listagens: `page` e `limit` (máx. 100), resposta `{ data, meta }`. Datas com hora em ISO 8601 com fuso (`2026-11-10T14:00:00-03:00`); o banco grava em UTC. `idosoId` é o mesmo id usado no prontuário (ex.: `p02`).
 
@@ -220,13 +287,17 @@ Códigos `<modulo>.<acao>`, adicionados em `src/lib/permissions.js` (arquivo da 
 
 ## Auditoria
 
-Usa a auditoria da Fundação (`public.audit_log`, via `audit()` em `src/db/helpers.js`), que já grava autor, data/hora, ação, entidade e identificador. O resultado vai em `payload.resultado` (`sucesso` ou `recusado_conflito`). O payload não leva texto clínico livre.
+Usa a auditoria da Fundação (`public.audit_log`, via `audit()` em `src/db/helpers.js`), que já grava autor, data/hora, ação, entidade e identificador. O resultado vai em `payload.resultado` (`sucesso` ou `recusado_conflito`). O payload não leva texto clínico livre nem contatos de colaboradores (na edição, só os nomes dos campos alterados).
 
 | Ação | Quando |
 |---|---|
 | `tipo_atendimento.criar` · `editar` · `ativar` · `inativar` | Alterações em tipos |
 | `colaborador.criar` · `editar` · `ativar` · `inativar` | Alterações em colaboradores |
 | `agendamento.criar` · `reagendar` · `cancelar` · `realizado` · `nao_realizado` · `corrigir_realizacao` | Alterações em agendamentos; criar e reagendar também registram recusas por conflito |
+| `colaborador.disponibilidade` | Substituição da disponibilidade |
+| `escala.criar` · `editar` · `situacao` | Alterações em escalas |
+| `escala.cobertura` | Substituição da cobertura mínima (com a versão anterior) |
+| `presenca.registrar` · `saida` | Registro de presença e saída |
 
 ## Contratos de integração
 

@@ -83,6 +83,12 @@ const exemploColaborador = {
   nome: "Renata Gouveia",
   vinculo: "funcionario",
   status: "ativo",
+  cargo: "Fisioterapeuta",
+  setor: "Fisioterapia",
+  especialidade: "fisioterapia",
+  registroProfissional: "CREFITO-3 000.321",
+  email: "renata.gouveia@lardoirmaovelho.example",
+  telefone: "(11) 90000-0006",
   usuario: { id: "s06", nome: "Renata Gouveia" },
   criadoEm: "2026-11-09T12:00:00.000Z",
   atualizadoEm: "2026-11-09T12:00:00.000Z",
@@ -149,17 +155,30 @@ const corpoTipo = {
   },
 };
 
+const especialidade = {
+  type: "string", pattern: "^[a-z][a-z0-9_]{1,59}$", example: "clinica_medica",
+  description: "Área/especialidade em slug. É a chave usada na cobertura da escala.",
+};
+const horario = { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$", example: "08:00" };
+const dataDia = { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$", example: "2026-11-10" };
+
 const corpoColaborador = {
   type: "object",
   required: ["nome", "vinculo"],
+  description: "Sem CPF nem documento: não há uso definido para esses dados.",
   properties: {
     nome: { type: "string", minLength: 3, maxLength: 160 },
     vinculo: { type: "string", enum: ["funcionario", "voluntario", "externo"] },
+    cargo: { type: "string", minLength: 2, maxLength: 120, nullable: true },
+    setor: { type: "string", minLength: 2, maxLength: 120, nullable: true },
+    especialidade: { ...especialidade, nullable: true },
+    registroProfissional: { type: "string", maxLength: 60, nullable: true, example: "CRM-SP 000.000" },
+    email: { type: "string", format: "email", maxLength: 160, nullable: true },
+    telefone: { type: "string", pattern: "^[0-9 ()+-]{8,20}$", nullable: true },
     usuarioId: { type: "string", nullable: true, description: "Usuário do sistema (opcional). Um usuário vincula a um só colaborador." },
   },
 };
 
-const horario = { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$", example: "08:00" };
 const janela = [
   query("janelaInicio", horario, "Hora de início a partir de (HH:MM, fuso da instituição)."),
   query("janelaFim", horario, "Hora de início antes de (HH:MM, exclusivo). Precisa ser depois de janelaInicio."),
@@ -210,6 +229,59 @@ function exemploVisaoCategoria(cat) {
   };
 }
 
+const contatos = "`email` e `telefone` voltam `null`, com `contatosRestritos: true`, para quem não tem `equipe.visualizar`.";
+
+const exemploEscala = {
+  id: "3e4f5a6b-7c8d-4e9f-a0b1-c2d3e4f5a6b7",
+  colaborador: { id: exemploColaborador.id, nome: "Dra. Sônia Campos", vinculo: "voluntario" },
+  especialidade: "clinica_medica",
+  local: "Consultório 1",
+  data: "2026-11-10",
+  horaInicio: "08:00",
+  horaFim: "12:00",
+  situacao: "confirmada",
+  observacao: null,
+  motivoCancelamento: null,
+  criadoEm: "2026-11-09T12:00:00.000Z",
+  atualizadoEm: "2026-11-09T12:00:00.000Z",
+};
+
+const corpoEscala = {
+  type: "object",
+  required: ["colaboradorId", "local", "data", "horaInicio", "horaFim"],
+  properties: {
+    colaboradorId: uuid,
+    especialidade: { ...especialidade, nullable: true, description: "Padrão: especialidade do colaborador." },
+    local: { type: "string", minLength: 2, maxLength: 120 },
+    data: dataDia,
+    horaInicio: horario,
+    horaFim: { ...horario, description: "Depois de horaInicio. Turno que cruza a meia-noite vira dois registros." },
+    situacao: { type: "string", enum: ["prevista", "confirmada"], default: "prevista" },
+    observacao: { type: "string", maxLength: 500, nullable: true },
+  },
+};
+
+const periodoDias = [
+  query("inicio", dataDia, "Padrão: hoje (fuso da instituição)."),
+  query("fim", dataDia, "Padrão: início + 6 dias. Máximo de 62 dias."),
+];
+
+const exemploPresenca = {
+  id: "4f5a6b7c-8d9e-4f0a-b1c2-d3e4f5a6b7c8",
+  colaborador: { id: exemploColaborador.id, nome: "Carla Beatriz Nunes", vinculo: "funcionario" },
+  data: "2026-11-10",
+  situacao: "presente",
+  horaEntrada: "07:00",
+  horaSaida: null,
+  emAndamento: true,
+  atividade: "Plantão diurno",
+  justificativa: null,
+  escalaId: exemploEscala.id,
+  registradoPor: { id: "s02", nome: "Ricardo Almeida Teixeira" },
+  criadoEm: "2026-11-10T10:00:00.000Z",
+  atualizadoEm: "2026-11-10T10:00:00.000Z",
+};
+
 const lgpd = "Em consultas, fisioterapia e avaliações, `observacoes`, `motivoStatus` e `observacaoRealizacao` voltam `null` "
   + "com `conteudoRestrito: true` para quem não tem a permissão clínica (`atendimento-clinico.visualizar` ou "
   + "`fisioterapia.visualizar`), exceto o próprio profissional do agendamento.";
@@ -217,7 +289,8 @@ const lgpd = "Em consultas, fisioterapia e avaliações, `observacoes`, `motivoS
 export const tagsGrupo3 = [
   { name: "G3 · Tipos de atendimento", description: "US-065. Tipos e serviços da agenda única." },
   { name: "G3 · Agenda", description: "US-066 a US-073. Agendamentos, conflitos, reagendamento, cancelamento e realização." },
-  { name: "G3 · Equipe", description: "Cadastro único de colaboradores (mínimo da Fatia 1)." },
+  { name: "G3 · Equipe", description: "US-082, US-091, US-092, US-093. Cadastro único de colaboradores, disponibilidade e presença." },
+  { name: "G3 · Escalas", description: "US-083, US-084. Escala de atendimento (planejado), cobertura necessária e lacunas." },
 ];
 
 export const pathsGrupo3 = {
@@ -254,18 +327,29 @@ export const pathsGrupo3 = {
 
   "/api/colaboradores": {
     get: op("G3 · Equipe", "Listar colaboradores", "equipe.visualizar, agenda.criar ou agenda.editar", {
-      query: [...pagina, query("vinculo", { type: "string", enum: ["funcionario", "voluntario", "externo"] }), query("status", { type: "string", enum: ["ativo", "inativo"] }), query("q", { type: "string", maxLength: 80 })],
+      query: [
+        ...pagina,
+        query("vinculo", { type: "string", enum: ["funcionario", "voluntario", "externo"] }),
+        query("status", { type: "string", enum: ["ativo", "inativo"] }),
+        query("setor", { type: "string", maxLength: 120 }),
+        query("especialidade", especialidade),
+        query("q", { type: "string", maxLength: 80 }),
+      ],
       example: lista(exemploColaborador),
+      description: contatos,
     }),
     post: op("G3 · Equipe", "Cadastrar colaborador", "equipe.criar", {
       status: 201, body: corpoColaborador,
-      bodyExample: { nome: "Renata Gouveia", vinculo: "funcionario", usuarioId: "s06" },
+      bodyExample: {
+        nome: "Renata Gouveia", vinculo: "funcionario", cargo: "Fisioterapeuta", setor: "Fisioterapia", especialidade: "fisioterapia",
+        registroProfissional: "CREFITO-3 000.321", email: "renata.gouveia@lardoirmaovelho.example", telefone: "(11) 90000-0006", usuarioId: "s06",
+      },
       example: exemploColaborador,
       conflictExample: erro("Este usuário já está vinculado a outro colaborador."),
     }),
   },
   "/api/colaboradores/{id}": {
-    get: op("G3 · Equipe", "Detalhe do colaborador", "equipe.visualizar, agenda.criar ou agenda.editar", { params: [path("id")], errors: [404], example: exemploColaborador }),
+    get: op("G3 · Equipe", "Detalhe do colaborador", "equipe.visualizar, agenda.criar ou agenda.editar", { params: [path("id")], errors: [404], example: exemploColaborador, description: contatos }),
     put: op("G3 · Equipe", "Editar colaborador", "equipe.editar", {
       params: [path("id")], body: corpoColaborador, errors: [404], example: exemploColaborador,
       conflictExample: erro("Este usuário já está vinculado a outro colaborador."),
@@ -279,6 +363,147 @@ export const pathsGrupo3 = {
       errors: [404],
       example: { ...exemploColaborador, status: "inativo" },
       description: "Não há exclusão física. Colaborador inativo não recebe novos agendamentos.",
+    }),
+  },
+  "/api/colaboradores/{id}/disponibilidades": {
+    get: op("G3 · Equipe", "Disponibilidade semanal do colaborador", "equipe.visualizar, agenda.criar ou agenda.editar", {
+      params: [path("id")], errors: [404],
+      example: { colaborador: { id: exemploColaborador.id, nome: "Dra. Luciana Prado" }, data: [{ id: "d1", diaSemana: 2, horaInicio: "13:00", horaFim: "17:00", observacao: null }] },
+      description: "`diaSemana` ISO: 1 = segunda ... 7 = domingo.",
+    }),
+    put: op("G3 · Equipe", "Substituir a disponibilidade", "equipe.editar", {
+      params: [path("id")],
+      body: {
+        type: "object", required: ["disponibilidades"],
+        properties: {
+          disponibilidades: {
+            type: "array", maxItems: 28,
+            items: {
+              type: "object", required: ["diaSemana", "horaInicio", "horaFim"],
+              properties: {
+                diaSemana: { type: "integer", minimum: 1, maximum: 7 }, horaInicio: horario, horaFim: horario,
+                observacao: { type: "string", maxLength: 300, nullable: true },
+              },
+            },
+          },
+        },
+      },
+      bodyExample: { disponibilidades: [{ diaSemana: 2, horaInicio: "13:00", horaFim: "17:00" }, { diaSemana: 4, horaInicio: "13:00", horaFim: "17:00" }] },
+      errors: [404],
+      example: { data: [{ id: "d1", diaSemana: 2, horaInicio: "13:00", horaFim: "17:00", observacao: null }] },
+      description: "Substitui a lista inteira (vazia = sem disponibilidade declarada). 422 para horários sobrepostos no mesmo dia.",
+    }),
+  },
+  "/api/escalas": {
+    get: op("G3 · Escalas", "Listar escalas", "equipe.visualizar, agenda.visualizar ou atendimento-clinico.visualizar", {
+      query: [
+        ...pagina, ...periodoDias, query("colaboradorId", uuid), query("especialidade", especialidade),
+        query("situacao", { type: "string", enum: ["prevista", "confirmada", "cancelada"] }), query("local", { type: "string", maxLength: 120 }),
+      ],
+      example: { periodo: { inicio: "2026-11-10", fim: "2026-11-16" }, ...lista(exemploEscala) },
+    }),
+    post: op("G3 · Escalas", "Cadastrar escala (turno planejado)", "equipe.criar", {
+      status: 201, body: corpoEscala,
+      bodyExample: { colaboradorId: exemploColaborador.id, local: "Consultório 1", data: "2026-11-10", horaInicio: "08:00", horaFim: "12:00", situacao: "confirmada" },
+      example: { ...exemploEscala, avisos: [{ codigo: "fora_da_disponibilidade", mensagem: "Turno fora da disponibilidade declarada pelo colaborador." }] },
+      conflictExample: erro("O colaborador já está escalado nesse horário.", { conflitos: [{ escalaId: exemploEscala.id, local: "Consultório 1", horaInicio: "08:00", horaFim: "12:00" }] }),
+      description: "Colaborador precisa estar ativo. Turno sobreposto do mesmo colaborador (não cancelado) é 409, garantido também por restrição de exclusão no banco. `avisos` indica turno fora da disponibilidade declarada, sem impedir o cadastro.",
+    }),
+  },
+  "/api/escalas/{id}": {
+    get: op("G3 · Escalas", "Detalhe da escala", "equipe.visualizar, agenda.visualizar ou atendimento-clinico.visualizar", { params: [path("id")], errors: [404], example: exemploEscala }),
+    put: op("G3 · Escalas", "Editar escala", "equipe.editar", {
+      params: [path("id")], body: corpoEscala, errors: [404], example: { ...exemploEscala, avisos: [] },
+      conflictExample: erro("Escala cancelada não pode ser alterada."),
+    }),
+  },
+  "/api/escalas/{id}/situacao": {
+    patch: op("G3 · Escalas", "Alterar situação da escala", "equipe.editar", {
+      params: [path("id")],
+      body: {
+        type: "object", required: ["situacao"],
+        properties: { situacao: { type: "string", enum: ["prevista", "confirmada", "cancelada"] }, motivo: { type: "string", minLength: 3, maxLength: 500, nullable: true } },
+      },
+      bodyExample: { situacao: "cancelada", motivo: "Viagem do profissional" },
+      errors: [404, 409],
+      example: { ...exemploEscala, situacao: "cancelada", motivoCancelamento: "Viagem do profissional" },
+      description: "Sem exclusão física: cancelar libera o horário. Escala cancelada não volta a ser alterada (409).",
+    }),
+  },
+  "/api/escalas/cobertura-necessaria": {
+    get: op("G3 · Escalas", "Cobertura mínima configurada", "equipe.visualizar, agenda.visualizar ou atendimento-clinico.visualizar", {
+      example: { data: [{ id: "c1", especialidade: "clinica_medica", diaSemana: 1, horaInicio: "08:00", horaFim: "12:00", quantidadeMinima: 1 }] },
+    }),
+    put: op("G3 · Escalas", "Substituir a cobertura mínima", "equipe.administrar", {
+      body: {
+        type: "object", required: ["coberturas"],
+        properties: {
+          coberturas: {
+            type: "array", maxItems: 200,
+            items: {
+              type: "object", required: ["especialidade", "diaSemana", "horaInicio", "horaFim", "quantidadeMinima"],
+              properties: {
+                especialidade, diaSemana: { type: "integer", minimum: 1, maximum: 7 }, horaInicio: horario, horaFim: horario,
+                quantidadeMinima: { type: "integer", minimum: 1, maximum: 50 },
+              },
+            },
+          },
+        },
+      },
+      bodyExample: { coberturas: [{ especialidade: "odontologia", diaSemana: 2, horaInicio: "13:00", horaFim: "17:00", quantidadeMinima: 1 }] },
+      example: { data: [{ id: "c1", especialidade: "odontologia", diaSemana: 2, horaInicio: "13:00", horaFim: "17:00", quantidadeMinima: 1 }] },
+      description: "Substitui toda a configuração; a versão anterior fica na auditoria. 422 para faixas sobrepostas da mesma especialidade no mesmo dia.",
+    }),
+  },
+  "/api/escalas/lacunas": {
+    get: op("G3 · Escalas", "Lacunas na escala", "equipe.visualizar, agenda.visualizar ou atendimento-clinico.visualizar", {
+      query: [...periodoDias, query("especialidade", especialidade)],
+      example: {
+        periodo: { inicio: "2026-11-10", fim: "2026-11-16" },
+        coberturasConsideradas: 7,
+        resumo: { lacunas: 1, profissionaisFaltando: 1 },
+        data: [{ data: "2026-11-11", diaSemana: 3, especialidade: "clinica_medica", inicio: "10:00", fim: "12:00", necessario: 1, escalados: 0, faltam: 1 }],
+      },
+      description: "Para cada dia do período e cada cobertura configurada, os trechos com menos escalados que o mínimo. Contam escalas `prevista` e `confirmada` de colaboradores ativos, da mesma especialidade.",
+    }),
+  },
+  "/api/presencas": {
+    get: op("G3 · Equipe", "Quem está trabalhando (presenças)", "equipe.visualizar", {
+      query: [
+        ...pagina, query("data", dataDia), query("inicio", dataDia), query("fim", dataDia), query("colaboradorId", uuid),
+        query("vinculo", { type: "string", enum: ["funcionario", "voluntario", "externo"] }),
+        query("situacao", { type: "string", enum: ["presente", "ausente"] }),
+        query("emAndamento", { type: "boolean" }, "true = presente sem saída registrada."),
+      ],
+      example: lista(exemploPresenca),
+    }),
+    post: op("G3 · Equipe", "Registrar presença ou ausência", "equipe.criar", {
+      status: 201,
+      body: {
+        type: "object", required: ["colaboradorId", "data"],
+        properties: {
+          colaboradorId: uuid, data: { ...dataDia, description: "Hoje ou passado." },
+          situacao: { type: "string", enum: ["presente", "ausente"], default: "presente" },
+          horaEntrada: { ...horario, nullable: true, description: "Obrigatória para presente; proibida para ausente." },
+          horaSaida: { ...horario, nullable: true },
+          atividade: { type: "string", maxLength: 300, nullable: true },
+          justificativa: { type: "string", maxLength: 500, nullable: true },
+          escalaId: { ...uuid, nullable: true, description: "Turno previsto (mesmo colaborador e data). Uma presença por escala." },
+        },
+      },
+      bodyExample: { colaboradorId: exemploColaborador.id, data: "2026-11-10", horaEntrada: "07:00", atividade: "Plantão diurno", escalaId: exemploEscala.id },
+      example: exemploPresenca,
+      conflictExample: erro("O colaborador já tem presença em aberto nesta data. Registre a saída antes."),
+      description: "Presença é o que aconteceu e fica separada da escala (o planejado). 409 se a escala já tem presença ou se há presença em aberto no dia.",
+    }),
+  },
+  "/api/presencas/{id}/saida": {
+    patch: op("G3 · Equipe", "Registrar saída", "equipe.criar ou equipe.editar", {
+      params: [path("id")],
+      body: { type: "object", required: ["horaSaida"], properties: { horaSaida: horario } },
+      bodyExample: { horaSaida: "19:00" },
+      errors: [404, 409],
+      example: { ...exemploPresenca, horaSaida: "19:00", emAndamento: false },
     }),
   },
   "/api/colaboradores/{id}/agenda": {

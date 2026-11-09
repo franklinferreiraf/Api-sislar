@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   calcularEnvios,
+  calcularLacunas,
+  dentroDaDisponibilidade,
+  diaSemanaIso,
+  mascararContatos,
   calcularFim,
   janelaValida,
   emConflito,
@@ -178,5 +182,62 @@ describe("grupo3 · janela de atendimento (US-070)", () => {
     assert.equal(janelaValida("08:00", "10:00"), true);
     assert.equal(janelaValida("10:00", "10:00"), false);
     assert.equal(janelaValida("10:00", undefined), true);
+  });
+});
+
+describe("grupo3 · lacunas da escala (US-084)", () => {
+  const necessidade = { inicio: "08:00", fim: "12:00", minimo: 2 };
+
+  it("sem ninguém escalado a faixa inteira é lacuna", () => {
+    assert.deepEqual(calcularLacunas(necessidade, []), [
+      { inicio: "08:00", fim: "12:00", necessario: 2, escalados: 0, faltam: 2 },
+    ]);
+  });
+
+  it("aponta só os trechos abaixo do mínimo", () => {
+    const turnos = [{ inicio: "08:00", fim: "10:00" }, { inicio: "09:00", fim: "12:00" }];
+    assert.deepEqual(calcularLacunas(necessidade, turnos), [
+      { inicio: "08:00", fim: "09:00", necessario: 2, escalados: 1, faltam: 1 },
+      { inicio: "10:00", fim: "12:00", necessario: 2, escalados: 1, faltam: 1 },
+    ]);
+  });
+
+  it("turno fora da faixa não conta e cobertura completa não gera lacuna", () => {
+    assert.equal(calcularLacunas({ ...necessidade, minimo: 1 }, [{ inicio: "13:00", fim: "17:00" }]).length, 1);
+    assert.deepEqual(calcularLacunas({ ...necessidade, minimo: 1 }, [{ inicio: "07:00", fim: "13:00" }]), []);
+  });
+
+  it("une trechos vizinhos com a mesma contagem", () => {
+    const turnos = [{ inicio: "08:00", fim: "09:00" }, { inicio: "09:00", fim: "12:00" }];
+    assert.deepEqual(calcularLacunas(necessidade, turnos), [
+      { inicio: "08:00", fim: "12:00", necessario: 2, escalados: 1, faltam: 1 },
+    ]);
+  });
+
+  it("dia da semana ISO", () => {
+    assert.equal(diaSemanaIso("2030-06-03"), 1);
+    assert.equal(diaSemanaIso("2030-06-04"), 2);
+    assert.equal(diaSemanaIso("2030-06-09"), 7);
+  });
+});
+
+describe("grupo3 · disponibilidade e contatos (US-082, US-091, US-092)", () => {
+  const disp = [{ diaSemana: 2, inicio: "08:00", fim: "12:00" }];
+
+  it("turno dentro, fora ou sem disponibilidade declarada", () => {
+    assert.equal(dentroDaDisponibilidade(disp, 2, "08:00", "12:00"), true);
+    assert.equal(dentroDaDisponibilidade(disp, 2, "11:00", "13:00"), false);
+    assert.equal(dentroDaDisponibilidade(disp, 3, "08:00", "09:00"), false);
+    assert.equal(dentroDaDisponibilidade([], 2, "08:00", "09:00"), null);
+  });
+
+  it("contatos só com equipe.visualizar", () => {
+    const colaborador = { nome: "Fulana", email: "f@x.example", telefone: "(11) 90000-0000", cargo: "Cuidadora" };
+    const restrito = mascararContatos(colaborador, { permissions: ["agenda.criar"] });
+    assert.equal(restrito.email, null);
+    assert.equal(restrito.telefone, null);
+    assert.equal(restrito.cargo, "Cuidadora");
+    assert.equal(restrito.contatosRestritos, true);
+    assert.equal(mascararContatos(colaborador, { permissions: ["equipe.visualizar"] }).email, "f@x.example");
   });
 });

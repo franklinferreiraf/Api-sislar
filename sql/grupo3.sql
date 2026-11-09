@@ -3,6 +3,8 @@ BEGIN;
 -- Grupo 3 — Agenda, atendimentos e profissionais (E07–E10).
 -- Usuários e idosos entram só como UUID (users.ref, patients.ref), validados pela API.
 CREATE SCHEMA IF NOT EXISTS grupo3;
+-- btree_gist: restrição de exclusão (sem sobreposição) com uuid na escala.
+CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public;
 SET search_path = grupo3, pg_catalog;
 
 CREATE TYPE vinculo_colaborador AS ENUM ('funcionario','voluntario','externo');
@@ -11,6 +13,8 @@ CREATE TYPE categoria_atendimento AS ENUM (
   'consulta_medica','consulta_odontologica','fisioterapia','cuidado_pessoal','farmacia','avaliacao','outro'
 );
 CREATE TYPE status_agendamento AS ENUM ('agendado','realizado','nao_realizado','cancelado');
+CREATE TYPE situacao_escala AS ENUM ('prevista','confirmada','cancelada');
+CREATE TYPE situacao_presenca AS ENUM ('presente','ausente');
 CREATE TYPE status_lembrete AS ENUM ('pendente','enviado','entregue','falha','sem_destinatario','cancelado');
 
 -- Regras configuráveis do grupo (chave/valor). Ver docs/grupo3/decisoes-pendentes.md.
@@ -59,17 +63,42 @@ BEGIN
   RETURN NEW;
 END $$;
 
--- Cadastro único da equipe (funcionários, voluntários e externos). Completado na Fatia 3.
+-- Cadastro único da equipe (funcionários, voluntários e externos) — US-082, US-091, US-092.
+-- Sem CPF nem documento: não há uso definido. Contatos só aparecem com equipe.visualizar.
 CREATE TABLE colaborador (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   nome text NOT NULL CHECK (char_length(btrim(nome)) BETWEEN 3 AND 160),
   vinculo vinculo_colaborador NOT NULL,
   status status_colaborador NOT NULL DEFAULT 'ativo',
+  cargo text CHECK (cargo IS NULL OR char_length(cargo) BETWEEN 2 AND 120),
+  setor text CHECK (setor IS NULL OR char_length(setor) BETWEEN 2 AND 120),
+  -- Área/especialidade em slug (ex.: clinica_medica, odontologia); é a chave da cobertura da escala.
+  especialidade text CHECK (especialidade IS NULL OR especialidade ~ '^[a-z][a-z0-9_]{1,59}$'),
+  registro_profissional text CHECK (registro_profissional IS NULL OR char_length(registro_profissional) <= 60),
+  email text CHECK (email IS NULL OR (char_length(email) <= 160 AND email ~ '^[^@\s]+@[^@\s]+\.[^@\s]+$')),
+  telefone text CHECK (telefone IS NULL OR telefone ~ '^[0-9 ()+-]{8,20}$'),
   usuario_ref uuid UNIQUE,
   criado_em timestamptz NOT NULL DEFAULT now(),
   atualizado_em timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX indice_colaborador_nome ON colaborador (lower(nome));
+CREATE INDEX indice_colaborador_especialidade ON colaborador (especialidade) WHERE especialidade IS NOT NULL;
+
+-- Disponibilidade semanal declarada (US-082, US-092). dia_semana ISO: 1 = segunda ... 7 = domingo.
+CREATE TABLE disponibilidade_colaborador (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  colaborador_id uuid NOT NULL REFERENCES colaborador(id),
+  dia_semana smallint NOT NULL CHECK (dia_semana BETWEEN 1 AND 7),
+  hora_inicio time NOT NULL,
+  hora_fim time NOT NULL,
+  observacao text CHECK (observacao IS NULL OR char_length(observacao) <= 300),
+  CHECK (hora_fim > hora_inicio),
+  EXCLUDE USING gist (
+    colaborador_id public.gist_uuid_ops WITH =,
+    dia_semana WITH =,
+    tsrange('2000-01-01'::date + hora_inicio, '2000-01-01'::date + hora_fim) WITH &&
+  )
+);
 CREATE TRIGGER marcar_atualizacao_colaborador BEFORE UPDATE ON colaborador
   FOR EACH ROW EXECUTE FUNCTION marcar_atualizacao();
 CREATE TRIGGER impedir_exclusao_colaborador BEFORE DELETE ON colaborador
@@ -204,6 +233,76 @@ CREATE INDEX indice_lembrete_agendamento ON lembrete_agendamento (agendamento_id
 CREATE TRIGGER marcar_atualizacao_lembrete BEFORE UPDATE ON lembrete_agendamento
   FOR EACH ROW EXECUTE FUNCTION marcar_atualizacao();
 CREATE TRIGGER impedir_exclusao_lembrete BEFORE DELETE ON lembrete_agendamento
+  FOR EACH ROW EXECUTE FUNCTION impedir_exclusao();
+
+-- Escala de atendimento: o PLANEJADO (US-083). Horários no relógio local da instituição.
+-- Turno que cruza a meia-noite é cadastrado em dois registros.
+CREATE TABLE escala (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  colaborador_id uuid NOT NULL REFERENCES colaborador(id),
+  especialidade text CHECK (especialidade IS NULL OR especialidade ~ '^[a-z][a-z0-9_]{1,59}$'),
+  local text NOT NULL CHECK (char_length(btrim(local)) BETWEEN 2 AND 120),
+  data date NOT NULL,
+  hora_inicio time NOT NULL,
+  hora_fim time NOT NULL,
+  situacao situacao_escala NOT NULL DEFAULT 'prevista',
+  observacao text CHECK (observacao IS NULL OR char_length(observacao) <= 500),
+  motivo_cancelamento text CHECK (motivo_cancelamento IS NULL OR char_length(motivo_cancelamento) <= 500),
+  criado_por_ref uuid NOT NULL,
+  criado_em timestamptz NOT NULL DEFAULT now(),
+  atualizado_em timestamptz NOT NULL DEFAULT now(),
+  CHECK (hora_fim > hora_inicio),
+  -- Mesmo colaborador não fica em dois turnos sobrepostos (cancelados não contam).
+  EXCLUDE USING gist (
+    colaborador_id public.gist_uuid_ops WITH =,
+    tsrange(data + hora_inicio, data + hora_fim) WITH &&
+  ) WHERE (situacao <> 'cancelada')
+);
+CREATE INDEX indice_escala_data ON escala (data, especialidade);
+CREATE TRIGGER marcar_atualizacao_escala BEFORE UPDATE ON escala
+  FOR EACH ROW EXECUTE FUNCTION marcar_atualizacao();
+CREATE TRIGGER impedir_exclusao_escala BEFORE DELETE ON escala
+  FOR EACH ROW EXECUTE FUNCTION impedir_exclusao();
+
+-- Necessidade mínima de cobertura da escala (US-084), configurável pela gestão.
+CREATE TABLE cobertura_necessaria (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  especialidade text NOT NULL CHECK (especialidade ~ '^[a-z][a-z0-9_]{1,59}$'),
+  dia_semana smallint NOT NULL CHECK (dia_semana BETWEEN 1 AND 7),
+  hora_inicio time NOT NULL,
+  hora_fim time NOT NULL,
+  quantidade_minima smallint NOT NULL CHECK (quantidade_minima BETWEEN 1 AND 50),
+  CHECK (hora_fim > hora_inicio),
+  EXCLUDE USING gist (
+    especialidade WITH =,
+    dia_semana WITH =,
+    tsrange('2000-01-01'::date + hora_inicio, '2000-01-01'::date + hora_fim) WITH &&
+  )
+);
+
+-- Presença: o que ACONTECEU (US-093). Separada da escala; pode apontar para o turno previsto.
+CREATE TABLE presenca (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  colaborador_id uuid NOT NULL REFERENCES colaborador(id),
+  escala_id uuid REFERENCES escala(id),
+  data date NOT NULL,
+  situacao situacao_presenca NOT NULL DEFAULT 'presente',
+  hora_entrada time,
+  hora_saida time,
+  atividade text CHECK (atividade IS NULL OR char_length(atividade) <= 300),
+  justificativa text CHECK (justificativa IS NULL OR char_length(justificativa) <= 500),
+  registrado_por_ref uuid NOT NULL,
+  criado_em timestamptz NOT NULL DEFAULT now(),
+  atualizado_em timestamptz NOT NULL DEFAULT now(),
+  CHECK (situacao <> 'presente' OR hora_entrada IS NOT NULL),
+  CHECK (situacao <> 'ausente' OR (hora_entrada IS NULL AND hora_saida IS NULL)),
+  CHECK (hora_saida IS NULL OR hora_saida > hora_entrada)
+);
+CREATE INDEX indice_presenca_data ON presenca (data, colaborador_id);
+CREATE UNIQUE INDEX indice_presenca_escala ON presenca (escala_id) WHERE escala_id IS NOT NULL;
+CREATE TRIGGER marcar_atualizacao_presenca BEFORE UPDATE ON presenca
+  FOR EACH ROW EXECUTE FUNCTION marcar_atualizacao();
+CREATE TRIGGER impedir_exclusao_presenca BEFORE DELETE ON presenca
   FOR EACH ROW EXECUTE FUNCTION impedir_exclusao();
 
 COMMIT;

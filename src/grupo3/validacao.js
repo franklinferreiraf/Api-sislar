@@ -14,6 +14,9 @@ export const dataHora = z.string()
   .transform((value) => new Date(value));
 
 export const horario = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use o horário no formato HH:MM.");
+// Área/especialidade em slug (ex.: clinica_medica, odontologia, fisioterapia).
+export const especialidade = z.string().trim().toLowerCase()
+  .regex(/^[a-z][a-z0-9_]{1,59}$/, "Use letras minúsculas, números e _ (ex.: clinica_medica).");
 export const categoria = z.enum(CATEGORIAS);
 export const statusAgendamento = z.enum(STATUS_AGENDAMENTO);
 export const duracaoMin = z.number().int().min(5, "Duração mínima de 5 minutos.").max(720, "Duração máxima de 12 horas.");

@@ -154,3 +154,80 @@ export function janelaValida(inicio, fim) {
   if (!inicio || !fim) return true;
   return minutosDoDia(fim) > minutosDoDia(inicio);
 }
+
+// ---------- Escala e cobertura (US-083, US-084) ----------
+
+export function minutosParaHorario(minutos) {
+  const h = String(Math.floor(minutos / 60)).padStart(2, "0");
+  const m = String(minutos % 60).padStart(2, "0");
+  return `${h}:${m}`;
+}
+
+// Dia da semana ISO (1 = segunda ... 7 = domingo) de uma data AAAA-MM-DD.
+export function diaSemanaIso(data) {
+  const dia = new Date(`${data}T00:00:00Z`).getUTCDay();
+  return dia === 0 ? 7 : dia;
+}
+
+export function horariosSobrepoem(a, b) {
+  return minutosDoDia(a.inicio) < minutosDoDia(b.fim) && minutosDoDia(b.inicio) < minutosDoDia(a.fim);
+}
+
+/**
+ * Trechos da faixa necessária com menos profissionais escalados que o mínimo.
+ * `necessidade` = { inicio: "HH:MM", fim: "HH:MM", minimo }; `turnos` = [{ inicio, fim }] do mesmo dia e área.
+ * Trechos vizinhos com a mesma contagem são unidos.
+ */
+export function calcularLacunas(necessidade, turnos) {
+  const ini = minutosDoDia(necessidade.inicio);
+  const fim = minutosDoDia(necessidade.fim);
+  const faixas = turnos.map((t) => [minutosDoDia(t.inicio), minutosDoDia(t.fim)]);
+  const marcos = new Set([ini, fim]);
+  for (const [a, b] of faixas) {
+    if (a > ini && a < fim) marcos.add(a);
+    if (b > ini && b < fim) marcos.add(b);
+  }
+  const ordenados = [...marcos].sort((x, y) => x - y);
+  const lacunas = [];
+  for (let i = 0; i < ordenados.length - 1; i += 1) {
+    const a = ordenados[i];
+    const b = ordenados[i + 1];
+    const escalados = faixas.filter(([t0, t1]) => t0 <= a && t1 >= b).length;
+    if (escalados >= necessidade.minimo) continue;
+    const ultima = lacunas[lacunas.length - 1];
+    if (ultima && ultima.fimMin === a && ultima.escalados === escalados) {
+      ultima.fimMin = b;
+    } else {
+      lacunas.push({ inicioMin: a, fimMin: b, escalados });
+    }
+  }
+  return lacunas.map((l) => ({
+    inicio: minutosParaHorario(l.inicioMin),
+    fim: minutosParaHorario(l.fimMin),
+    necessario: necessidade.minimo,
+    escalados: l.escalados,
+    faltam: necessidade.minimo - l.escalados,
+  }));
+}
+
+/**
+ * O turno cabe numa disponibilidade declarada? Sem disponibilidade cadastrada, devolve null (sem aviso).
+ * `disponibilidades` = [{ diaSemana, inicio: "HH:MM", fim: "HH:MM" }].
+ */
+export function dentroDaDisponibilidade(disponibilidades, diaSemana, inicio, fim) {
+  if (!disponibilidades.length) return null;
+  return disponibilidades.some((d) => d.diaSemana === diaSemana
+    && minutosDoDia(d.inicio) <= minutosDoDia(inicio) && minutosDoDia(d.fim) >= minutosDoDia(fim));
+}
+
+// ---------- Contatos da equipe ----------
+
+const CAMPOS_CONTATO = ["email", "telefone"];
+
+// Contatos e dados pessoais do colaborador só com equipe.visualizar.
+export function mascararContatos(colaborador, usuario) {
+  if (usuario.permissions.includes("equipe.visualizar")) return colaborador;
+  const copia = { ...colaborador, contatosRestritos: true };
+  for (const campo of CAMPOS_CONTATO) copia[campo] = null;
+  return copia;
+}

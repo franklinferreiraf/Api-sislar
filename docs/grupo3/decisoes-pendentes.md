@@ -8,7 +8,7 @@ Cada linha registra o que foi assumido e onde está no código, para trocar sem 
 |---|---|---|---|
 | **D-001** | Perfis exatos do sistema | Matriz módulo × ação aprovada (ver [README](README.md#matriz-de-permissões)). **O voluntário não vê a agenda geral, só a própria (`GET /api/me/agenda`).** Qualquer usuário autenticado com colaborador vinculado vê a própria agenda, e o profissional do agendamento sempre vê o detalhe e o histórico dele. | `src/lib/permissions.js` (`ROLE_PERMISSIONS`); `/me/agenda` e `acessarAgendamento()` em `src/routes/grupo3/agendamentos.js` |
 | **D-008** | Canais dos lembretes | Só notificação interna (`public.notifications`), já considerada entregue ao ser gravada. O canal fica atrás da porta de notificações; a coluna `canal` do lembrete guarda o canal usado. | `src/grupo3/portas/notificacoes.js` |
-| **D-010** | Preenchimento da escala de médicos voluntários | Cadastro manual, sem recorrência nem integração. | Fatia 3 |
+| **D-010** | Preenchimento da escala de médicos voluntários | Cadastro manual de cada turno (`POST /api/escalas`), sem recorrência nem integração. A disponibilidade declarada só gera aviso, não cria turnos. | `src/routes/grupo3/escalas.js` |
 | **D-013** | Relatórios obrigatórios | Relatórios P2 viram endpoints JSON com filtros; exportação PDF/planilha fica com o Grupo 5. | Fatia 7 |
 | **D-017** | Infraestrutura de produção | Conexão, segredo, CORS e porta vêm de variáveis de ambiente (`DATABASE_URL`, `JWT_SECRET`, `CORS_ORIGIN`, `PORT`). Os jobs da Fatia 2 serão ligados por `JOBS_ENABLED`. | `src/config.js`, `.env.example` |
 | US-076 | Campos da atividade de fisioterapia | Campos fixos (descrição, frequência, duração, observações) + `configuracao jsonb` validado por zod (chaves livres, tamanho limitado). | Fatia 5 |
@@ -27,7 +27,7 @@ Cada linha registra o que foi assumido e onde está no código, para trocar sem 
 | Antecedência dos lembretes | 24 h (`[1440]`) | Padrão: `grupo3.configuracao`, chave `lembretes.antecedencias_min`. Por tipo: `grupo3.tipo_atendimento.antecedencias_lembrete_min` (`null` usa o padrão; `[]` desliga). Mudar a configuração não altera lembretes já gerados |
 | Tentativas de envio | 3 | `grupo3.configuracao`, chave `lembretes.max_tentativas` |
 | Intervalo do job | 60 s | Variável `JOBS_INTERVALO_SEG` (mínimo 10); o job só liga com `JOBS_ENABLED=true` |
-| Cobertura mínima da escala | Sem cobertura cadastrada | Fatia 3: tabela `grupo3.cobertura_necessaria` |
+| Cobertura mínima da escala | Seed de demonstração: clínica médica seg–sex 08–12 h; odontologia ter/qui 13–17 h, 1 profissional | Tabela `grupo3.cobertura_necessaria`, via `PUT /api/escalas/cobertura-necessaria` (`equipe.administrar`) |
 
 ## Suposições técnicas
 
@@ -44,6 +44,15 @@ Cada linha registra o que foi assumido e onde está no código, para trocar sem 
 | Lembrete atrasado | Antecedências que já passaram ao agendar viram um único envio imediato (a de menor antecedência). Início no passado não gera lembrete. Lembrete pendente de atendimento já iniciado é cancelado pelo job. | `calcularEnvios()` em `src/grupo3/regras.js`; `processarLembretes()` |
 | Janela de atendimento | Filtro pela hora de início do agendamento, no fuso da instituição, no intervalo [janelaInicio, janelaFim). Janela que cruza a meia-noite não é aceita. | `filtrosAgendamento()` em `src/grupo3/agenda.js` |
 | Responsável na agenda da farmácia | "Responsável" é o profissional do agendamento (`profissionalId`); quem de fato realizou pode ser filtrado por `responsavelRealizacaoId`. | `GET /api/agendas/farmacia` |
+| Dados pessoais da equipe | Sem CPF, RG ou documento (não há uso definido). Contatos limitados a e-mail e telefone, visíveis só com `equipe.visualizar`. | `src/routes/grupo3/colaboradores.js`; `mascararContatos()` em `src/grupo3/regras.js` |
+| Especialidade | Texto em slug (`clinica_medica`, `odontologia`, `fisioterapia`...) sem catálogo fechado, porque a instituição não definiu a lista. A cobertura e as lacunas casam pela especialidade exata. | `especialidade` em `src/grupo3/validacao.js` |
+| Cargo e setor | Opcionais para todos os vínculos; o backlog não define obrigatoriedade. | `POST /api/colaboradores` |
+| Escala x presença | Tabelas separadas: escala = planejado, presença = o que aconteceu. Presença pode apontar para o turno previsto (uma por escala). Cancelar a escala não apaga a presença. | `grupo3.escala`, `grupo3.presenca` |
+| Turno noturno | Escala e presença usam horário local sem cruzar a meia-noite; turno que atravessa a meia-noite é cadastrado em dois registros. | `CHECK (hora_fim > hora_inicio)` |
+| Turno fora da disponibilidade | Aceito, com aviso `fora_da_disponibilidade` na resposta. Sem disponibilidade declarada, nenhum aviso. | `dentroDaDisponibilidade()` |
+| Presença | Só para hoje ou datas passadas, de colaborador ativo. Uma presença em aberto (sem saída) por colaborador e dia. A justificativa da ausência é opcional. Registro só pela gestão (`equipe.criar`); leitura com `equipe.visualizar`. | `src/routes/grupo3/presencas.js` |
+| Escala cancelada | Motivo opcional, guardado em `motivo_cancelamento`. Situação `cancelada` é final. | `PATCH /api/escalas/{id}/situacao` |
+| Leitura de escalas e lacunas | Também para quem tem `agenda.visualizar` ou `atendimento-clinico.visualizar` (saber quem está escalado), sem contatos. | `VER` em `src/routes/grupo3/escalas.js` |
 | Formato de erro | Mantido o do repositório, `{ error: { message, details } }`, e não ProblemDetails. | `src/middleware/error.js` |
 | Base dos paths | `/api`, sem `/v1`, como o resto da API. | `src/routes/grupo3/index.js` |
 | Migrations | O repositório não tem migrations incrementais: `db:setup` recria o banco a partir de `sql/*.sql`. O schema do G3 é `sql/grupo3.sql`. Migração incremental é decisão da Fundação. | `src/db/reset.js` |
