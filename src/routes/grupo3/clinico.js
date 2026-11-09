@@ -8,11 +8,11 @@ import { prisma } from "../../db/prisma.js";
 import { HttpError } from "../../lib/httpError.js";
 import { pageMeta, pageSchema } from "../../lib/paging.js";
 import { asyncHandler } from "../../middleware/async.js";
-import { requirePerm } from "../../middleware/auth.js";
+import { loadUser, requirePerm } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validate.js";
 import { auditarLeitura } from "../../grupo3/auditoria.js";
 import { buscarIdoso, buscarIdososPorRef } from "../../grupo3/portas/idosos.js";
-import { podeVerIdoso, publicarNoProntuario } from "../../grupo3/portas/prontuario.js";
+import { podePublicar, podeVerIdoso, publicarNoProntuario } from "../../grupo3/portas/prontuario.js";
 import { areaClinica, periodoDoCiclo } from "../../grupo3/regras.js";
 import { conteudoFlexivel, dataHora, dia, idParam, idosoId, temPermissao, uuid } from "../../grupo3/validacao.js";
 
@@ -100,19 +100,28 @@ async function exigirAcompanhamento(db, acompanhamentoId, idosoRef, area) {
   if (rows[0].idoso_ref !== idosoRef) throw erroCampo("acompanhamentoId", "O acompanhamento é de outro idoso.");
 }
 
-/** Finaliza (ou cria finalizado) e publica no prontuário, numa única atualização do registro. */
+/**
+ * Publica no prontuário se o autor tem evolucao.create (permissão do Grupo 1, não contornada); senão
+ * devolve "aguardando_permissao" para republicar depois.
+ */
+export async function publicarSePermitido(tx, autor, registro) {
+  if (!podePublicar(autor)) return { status: "aguardando_permissao", referencia: null };
+  return publicarNoProntuario({
+    idosoId: registro.idoso.id,
+    autorUsuarioId: autor.id,
+    area: registro.area,
+    tipo: registro.tipo,
+    realizadoEm: registro.realizadoEm,
+    resumo: registro.resumo,
+    adendo: Boolean(registro.adendoDe),
+    referenciaId: registro.id,
+  }, tx);
+}
+
+/** Finaliza (ou cria finalizado) e publica no prontuário quando permitido, numa única atualização. */
 async function finalizarEPublicar(tx, req, registroId) {
   const atual = await buscarRegistro(registroId, tx);
-  const publicacao = await publicarNoProntuario({
-    idosoId: atual.idoso.id,
-    autorUsuarioId: req.user.id,
-    area: atual.area,
-    tipo: atual.tipo,
-    realizadoEm: atual.realizadoEm,
-    resumo: atual.resumo,
-    adendo: Boolean(atual.adendoDe),
-    referenciaId: atual.id,
-  }, tx);
+  const publicacao = await publicarSePermitido(tx, req.user, atual);
   await tx.$executeRaw`
     UPDATE grupo3.registro_clinico
     SET status = 'finalizado', finalizado_em = now(), finalizado_por_ref = ${req.user.ref}::uuid,
@@ -309,10 +318,7 @@ router.post(
         ) RETURNING id
       `;
       const adendo = await buscarRegistro(rows[0].id, tx);
-      const publicacao = await publicarNoProntuario({
-        idosoId: adendo.idoso.id, autorUsuarioId: req.user.id, area: adendo.area, tipo: adendo.tipo,
-        realizadoEm: adendo.realizadoEm, resumo: adendo.resumo, adendo: true, referenciaId: adendo.id,
-      }, tx);
+      const publicacao = await publicarSePermitido(tx, req.user, adendo);
       await tx.$executeRaw`
         UPDATE grupo3.registro_clinico SET publicacao_status = ${publicacao.status}, prontuario_ref = ${publicacao.referencia ?? null}
         WHERE id = ${adendo.id}::uuid
@@ -324,6 +330,54 @@ router.post(
       return original.id;
     });
     res.status(201).json(await comAdendos(await buscarRegistro(principalId)));
+  }),
+);
+
+// Tenta publicar de novo os registros finalizados que ficaram sem publicação. Publica em nome de quem
+// finalizou, se essa pessoa agora tem evolucao.create.
+router.post(
+  "/registros-clinicos/republicar-pendentes",
+  requirePerm(ADMIN),
+  asyncHandler(async (req, res) => {
+    const resumo = { verificados: 0, publicados: 0, aguardandoPermissao: 0 };
+    const pendentes = await prisma.$queryRaw`
+      SELECT r.id, u.id AS finalizado_por_id
+      FROM grupo3.registro_clinico r
+      LEFT JOIN public.users u ON u.ref = r.finalizado_por_ref
+      WHERE r.status = 'finalizado' AND r.publicacao_status IN ('aguardando_permissao', 'pendente_integracao', 'falha')
+      ORDER BY r.finalizado_em
+      LIMIT 500
+    `;
+    const autores = new Map();
+    for (const item of pendentes) {
+      resumo.verificados += 1;
+      if (item.finalizado_por_id && !autores.has(item.finalizado_por_id)) {
+        autores.set(item.finalizado_por_id, await loadUser(item.finalizado_por_id));
+      }
+      const autor = autores.get(item.finalizado_por_id);
+      if (!autor?.active || !podePublicar(autor)) {
+        resumo.aguardandoPermissao += 1;
+        continue;
+      }
+      await prisma.$transaction(async (tx) => {
+        const travado = await tx.$queryRaw`
+          SELECT publicacao_status FROM grupo3.registro_clinico WHERE id = ${item.id}::uuid FOR UPDATE
+        `;
+        if (travado[0].publicacao_status === "publicado") return;
+        const registro = await buscarRegistro(item.id, tx);
+        const publicacao = await publicarSePermitido(tx, autor, registro);
+        await tx.$executeRaw`
+          UPDATE grupo3.registro_clinico SET publicacao_status = ${publicacao.status}, prontuario_ref = ${publicacao.referencia ?? null}
+          WHERE id = ${item.id}::uuid
+        `;
+        await audit(tx, {
+          userId: req.user.id, action: "registro_clinico.republicar", entity: "grupo3.registro_clinico", entityId: item.id,
+          payload: { resultado: "sucesso", publicadoEmNomeDe: autor.id, idosoId: registro.idoso?.id },
+        });
+        resumo.publicados += 1;
+      });
+    }
+    res.json(resumo);
   }),
 );
 

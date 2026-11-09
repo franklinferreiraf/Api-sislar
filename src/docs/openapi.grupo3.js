@@ -880,7 +880,13 @@ export const pathsGrupo3 = {
   "/api/registros-clinicos/{id}/finalizar": {
     post: op("G3 · Atendimento clínico", "Finalizar e publicar no prontuário", "atendimento-clinico.editar (autor ou atendimento-clinico.administrar)", {
       params: [path("id")], errors: [404, 409], example: { ...exemploRegistro, adendos: [] },
-      description: "Exige a consulta realizada (409). Publica uma evolução finalizada no prontuário do idoso e guarda a referência em `publicacao`.",
+      description: "Exige a consulta realizada (409). Se quem finaliza tem `evolucao.create`, publica uma evolução finalizada no prontuário do idoso e guarda a referência em `publicacao`; senão `publicacao.status = \"aguardando_permissao\"`.",
+    }),
+  },
+  "/api/registros-clinicos/republicar-pendentes": {
+    post: op("G3 · Atendimento clínico", "Republicar no prontuário os registros pendentes", "atendimento-clinico.administrar", {
+      example: { verificados: 3, publicados: 2, aguardandoPermissao: 1 },
+      description: "Tenta publicar os registros finalizados com `publicacao.status` `aguardando_permissao`, `pendente_integracao` ou `falha`, em nome de quem finalizou, se essa pessoa agora tem `evolucao.create`. Idempotente.",
     }),
   },
   "/api/registros-clinicos/{id}/adendos": {

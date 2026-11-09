@@ -1,6 +1,5 @@
 // Dados de demonstração do Grupo 3 (agenda única, tipos de atendimento e equipe mínima).
 import { gerarLembretes } from "../grupo3/lembretes.js";
-import { publicarNoProntuario } from "../grupo3/portas/prontuario.js";
 
 const TIPOS = [
   // [nome, categoria, duração, exige motivo cancelar, exige motivo reagendar, permite sobreposição]
@@ -137,14 +136,11 @@ export async function seedGrupo3(tx) {
             'Consulta odontológica', ${p03.inicio}, 'Prótese bem adaptada, sem lesões em mucosa. Reforçada a higiene noturna.', ${dentistaRef}::uuid)
     RETURNING id
   `;
-  const publicacao = await publicarNoProntuario({
-    idosoId: "p03", autorUsuarioId: "s07", area: "odontologica", tipo: "Consulta odontológica", realizadoEm: p03.inicio,
-    resumo: "Prótese bem adaptada, sem lesões em mucosa. Reforçada a higiene noturna.", adendo: false, referenciaId: registro[0].id,
-  }, tx);
+  // A dentista não tem evolucao.create: o registro fica finalizado no G3, aguardando permissão para publicar.
   await tx.$executeRaw`
     UPDATE grupo3.registro_clinico
     SET status = 'finalizado', finalizado_em = ${p03.inicio}, finalizado_por_ref = ${dentistaRef}::uuid,
-        publicacao_status = ${publicacao.status}, prontuario_ref = ${publicacao.referencia}
+        publicacao_status = 'aguardando_permissao'
     WHERE id = ${registro[0].id}::uuid
   `;
   await tx.$executeRaw`

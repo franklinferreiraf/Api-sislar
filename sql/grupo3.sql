@@ -369,7 +369,8 @@ CREATE TABLE registro_clinico (
   autor_ref uuid NOT NULL,
   finalizado_em timestamptz,
   finalizado_por_ref uuid,
-  publicacao_status text CHECK (publicacao_status IS NULL OR publicacao_status IN ('publicado','pendente_integracao','falha')),
+  -- aguardando_permissao: quem finalizou não tem evolucao.create; publicado depois por republicar-pendentes.
+  publicacao_status text CHECK (publicacao_status IS NULL OR publicacao_status IN ('publicado','aguardando_permissao','pendente_integracao','falha')),
   prontuario_ref text,
   criado_em timestamptz NOT NULL DEFAULT now(),
   atualizado_em timestamptz NOT NULL DEFAULT now(),

@@ -1255,3 +1255,57 @@ describe("grupo3 · pendências odontológicas do ciclo (US-089)", () => {
     assert.equal((await get("gestor", "/api/odontologia/configuracao-ciclo")).body.modo, "semestre_civil");
   });
 });
+
+describe("grupo3 · publicação no prontuário respeita evolucao.create", () => {
+  let registroId;
+
+  it("autor sem evolucao.create finaliza no G3 e a publicação fica aguardando permissão", async () => {
+    const luciana = await colaboradorPorNome("Dra. Luciana Prado");
+    const consulta = (await post("recepcao", "/api/agendamentos", {
+      idosoId: "p13", tipoId: await tipoPorNome("Consulta odontológica"), profissionalId: luciana, local: "Consultório odontológico",
+      inicio: "2025-05-20T14:00:00-03:00",
+    })).body.id;
+    await post("recepcao", `/api/agendamentos/${consulta}/realizacao`, { status: "realizado" });
+    const antes = (await get("medico", "/api/prontuarios/p13/evolucoes")).body.data.length;
+    const registro = await post("odonto", `/api/agendamentos/${consulta}/registro-clinico`, {
+      resumo: "Higiene oral adequada, sem cáries novas.", finalizar: true,
+    });
+    assert.equal(registro.status, 201);
+    assert.equal(registro.body.status, "finalizado");
+    assert.deepEqual(registro.body.publicacao, { status: "aguardando_permissao", prontuarioRef: null });
+    registroId = registro.body.id;
+    const adendo = await post("odonto", `/api/registros-clinicos/${registroId}/adendos`, { resumo: "Adendo: orientada troca da escova." });
+    assert.equal(adendo.status, 201);
+    assert.equal(adendo.body.adendos[0].publicacao.status, "aguardando_permissao");
+    assert.equal((await get("medico", "/api/prontuarios/p13/evolucoes")).body.data.length, antes);
+  });
+
+  it("republicar exige administração e só publica quando o autor ganha a permissão", async () => {
+    assert.equal((await post("medico", "/api/registros-clinicos/republicar-pendentes", {})).status, 403);
+    const semPermissao = await post("gestor", "/api/registros-clinicos/republicar-pendentes", {});
+    assert.equal(semPermissao.status, 200);
+    assert.ok(semPermissao.body.aguardandoPermissao >= 2);
+    assert.equal((await get("gestor", `/api/registros-clinicos/${registroId}`)).body.publicacao.status, "aguardando_permissao");
+
+    const concedida = await request(app).patch("/api/usuarios/s07").set(await como("admin")).send({ profiles: ["odontologia", "medico"] });
+    assert.equal(concedida.status, 200);
+    assert.ok(concedida.body.user.permissions.includes("evolucao.create"));
+    try {
+      const republicado = await post("gestor", "/api/registros-clinicos/republicar-pendentes", {});
+      assert.ok(republicado.body.publicados >= 2);
+      const lido = await get("gestor", `/api/registros-clinicos/${registroId}`);
+      assert.equal(lido.body.publicacao.status, "publicado");
+      assert.equal(lido.body.adendos[0].publicacao.status, "publicado");
+      const evolucoes = (await get("medico", "/api/prontuarios/p13/evolucoes")).body.data;
+      const evolucao = evolucoes.find((e) => e.id === lido.body.publicacao.prontuarioRef);
+      assert.ok(evolucao);
+      assert.equal(evolucao.author_id ?? evolucao.authorId, "s07");
+      const denovo = await post("gestor", "/api/registros-clinicos/republicar-pendentes", {});
+      const total = (await get("medico", "/api/prontuarios/p13/evolucoes")).body.data.length;
+      assert.equal(total, evolucoes.length);
+      assert.equal(denovo.body.publicados, 0);
+    } finally {
+      await request(app).patch("/api/usuarios/s07").set(await como("admin")).send({ profiles: ["odontologia"] });
+    }
+  });
+});

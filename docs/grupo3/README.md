@@ -268,7 +268,7 @@ Integridade garantida no banco:
 
 **Consultas (US-085).** Consulta é um agendamento cujo tipo tem categoria `consulta_medica` ou `consulta_odontologica`. O `local` é obrigatório. Se o profissional não estiver numa escala não cancelada cobrindo todo o horário, o agendamento é aceito com o aviso `fora_da_escala` em `avisos`, sem bloquear. O mesmo aviso aparece no reagendamento e na verificação de conflitos.
 
-**Registro clínico (US-086, US-087).** Resultado da consulta com campos mínimos (profissional, data/hora, tipo, resumo) e `conteudo` flexível em jsonb, validado. Status `rascunho → finalizado`. O rascunho é editado só pelo autor (ou por `atendimento-clinico.administrar`). Finalizar exige a consulta realizada. **Finalizado não aceita edição** (gatilho no banco); a correção é um **adendo**: registro novo, finalizado, vinculado por `adendo_de`, com autor e data. Ao finalizar, o registro (e cada adendo) é publicado no prontuário do idoso como evolução finalizada. Registro odontológico pode apontar para o acompanhamento odontológico do mesmo idoso.
+**Registro clínico (US-086, US-087).** Resultado da consulta com campos mínimos (profissional, data/hora, tipo, resumo) e `conteudo` flexível em jsonb, validado. Status `rascunho → finalizado`. O rascunho é editado só pelo autor (ou por `atendimento-clinico.administrar`). Finalizar exige a consulta realizada. **Finalizado não aceita edição** (gatilho no banco); a correção é um **adendo**: registro novo, finalizado, vinculado por `adendo_de`, com autor e data. Ao finalizar, o registro (e cada adendo) é publicado no prontuário do idoso como evolução finalizada, **se quem finaliza tem `evolucao.create`** (permissão do Grupo 1, não contornada). Sem ela, o registro é finalizado no G3 com `publicacao.status = "aguardando_permissao"`; `POST /api/registros-clinicos/republicar-pendentes` publica depois, em nome de quem finalizou, quando a permissão for concedida. Registro odontológico pode apontar para o acompanhamento odontológico do mesmo idoso.
 
 **Acompanhamento odontológico (US-087).** Plano, periodicidade, próxima avaliação, responsável e situação (`em_tratamento`, `em_acompanhamento`, `concluido`, `suspenso`). Cada idoso tem no máximo um acompanhamento ativo.
 
@@ -315,6 +315,7 @@ A documentação completa, com exemplos e erros, está em `/api/docs`.
 | `GET /api/agendamentos/{id}/registro-clinico` · `GET /api/registros-clinicos/{id}` | `atendimento-clinico.visualizar` (leitura auditada) | 086 |
 | `PUT /api/registros-clinicos/{id}` · `POST /api/registros-clinicos/{id}/finalizar` | `atendimento-clinico.editar` (autor ou administrar) | 086 |
 | `POST /api/registros-clinicos/{id}/adendos` | `atendimento-clinico.criar` | 086 |
+| `POST /api/registros-clinicos/republicar-pendentes` | `atendimento-clinico.administrar` | 086 |
 | `GET /api/idosos/{idosoId}/registros-clinicos` | `atendimento-clinico.visualizar` (leitura auditada) | 086, 072 |
 | `GET /api/odontologia/acompanhamentos` · `GET /api/odontologia/acompanhamentos/{id}` | `atendimento-clinico.visualizar` (leitura auditada) | 087 |
 | `POST /api/odontologia/acompanhamentos` | `atendimento-clinico.criar` | 087 |
@@ -379,7 +380,7 @@ Usa a auditoria da Fundação (`public.audit_log`, via `audit()` em `src/db/help
 | `agendamento.criar` · `reagendar` · `cancelar` · `realizado` · `nao_realizado` · `corrigir_realizacao` | Alterações em agendamentos; criar e reagendar também registram recusas por conflito |
 | `colaborador.disponibilidade` | Substituição da disponibilidade |
 | `especialidade.criar` · `editar` · `ativar` · `inativar` | Alterações no catálogo de especialidades |
-| `registro_clinico.criar` · `criar_finalizado` · `editar` · `finalizar` · `adendo` | Registro clínico |
+| `registro_clinico.criar` · `criar_finalizado` · `editar` · `finalizar` · `adendo` · `republicar` | Registro clínico |
 | `acompanhamento_odontologico.criar` · `editar` · `tratamento_externo.criar` · `editar` · `odontologia.configuracao_ciclo` | Atendimento odontológico e externo |
 | `registro_clinico.ler` · `acompanhamento_odontologico.ler` · `tratamento_externo.ler` · `odontologia_pendencias.ler` | **Leitura** de dados clínicos: usuário, data/hora, idosos (`payload.idosos`), registros e rota |
 | `escala.criar` · `editar` · `situacao` | Alterações em escalas |
@@ -392,7 +393,7 @@ Usa a auditoria da Fundação (`public.audit_log`, via `audit()` em `src/db/help
 |---|---|---|---|
 | Idosos (G1, US-011) | `src/grupo3/portas/idosos.js` | Adaptador real sobre `public.patients` | `buscarIdoso(idosoId) → { id, ref, nome, ativo } \| null`; `buscarIdososPorRef(refs) → Map<ref, idoso>`. `ativo` é sempre `true`: `TODO(integracao-G1)` |
 | Prontuário — visibilidade (G1, US-031) | `src/grupo3/portas/prontuario.js` | Stub `TODO(integracao-G1)` | `podeVerIdoso(usuario, idoso) → boolean`, chamado no histórico do idoso |
-| Prontuário — evolução (G1, US-023) | `src/grupo3/portas/prontuario.js` | **Adaptador real**: a evolução já existe no repositório (`public.evolutions`) | `publicarNoProntuario({ idosoId, autorUsuarioId, area, tipo, realizadoEm, resumo, adendo, referenciaId }, db) → { status: "publicado", referencia }`. Cria uma evolução `finalizado` do tipo `reavaliacao`, com título "Consulta médica: …", "Consulta odontológica: …" ou "Adendo · …", na mesma transação do registro |
+| Prontuário — evolução (G1, US-023) | `src/grupo3/portas/prontuario.js` | **Adaptador real**: a evolução já existe no repositório (`public.evolutions`) | `publicarNoProntuario({ idosoId, autorUsuarioId, area, tipo, realizadoEm, resumo, adendo, referenciaId }, db) → { status: "publicado", referencia }`, chamado só se `podePublicar(autor)` (`evolucao.create`); senão `aguardando_permissao`. Cria uma evolução `finalizado` do tipo `reavaliacao` (temporário, `TODO(integracao-G1)`), com título "Consulta médica: …", "Consulta odontológica: …" ou "Adendo · …", na mesma transação do registro |
 | Prontuário — linha do tempo (G1, US-030) | `src/grupo3/portas/prontuario.js` | Não existe; `TODO(integracao-G1)` | Quando existir, publicar também nela |
 | Notificações (G4, US-117) | `src/grupo3/portas/notificacoes.js` | Adaptador real do canal interno sobre `public.notifications`; `TODO(integracao-G4)` para o serviço do Grupo 4 | `enviarNotificacao({ usuarioId, titulo, corpo, link }, db) → { status: "enviado" \| "entregue", canal, referencia }`. Exceção = falha (o job tenta de novo) |
 | Jobs (T-008) | `src/grupo3/jobs.js` | Agendador no processo, ligado por `JOBS_ENABLED=true` | `iniciarJobs({ intervaloSeg, jobs })` e `pararJobs()` (chamado no `SIGTERM`/`SIGINT` de `src/server.js`). Cada rodada tem try/catch com log sem dados sensíveis; se a anterior de um job ainda está rodando, a nova é pulada. `processarLembretes({ agora, limite, enviar })` também pode ser chamado direto |
