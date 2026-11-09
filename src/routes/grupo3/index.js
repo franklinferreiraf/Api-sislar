@@ -1,0 +1,16 @@
+// Rotas do Grupo 3 (Agenda, atendimentos e profissionais), montadas em /api.
+import { Router } from "express";
+import { requireAuth } from "../../middleware/auth.js";
+import agendamentosRouter from "./agendamentos.js";
+import colaboradoresRouter from "./colaboradores.js";
+import tiposAtendimentoRouter from "./tipos-atendimento.js";
+
+const router = Router();
+
+// Reaproveita a sessão já carregada por um router anterior em /api; senão autentica.
+router.use((req, res, next) => (req.user ? next() : requireAuth(req, res, next)));
+router.use(tiposAtendimentoRouter);
+router.use(colaboradoresRouter);
+router.use(agendamentosRouter);
+
+export default router;
