@@ -275,3 +275,47 @@ export function recortarNoDia(inicioLocal, fimLocal, data) {
   const b = Math.min(fim, 1440);
   return b > a ? { inicio: a, fim: b } : null;
 }
+
+// ---------- Atendimento médico e odontológico (US-085 a US-089) ----------
+
+const AREA_POR_CATEGORIA = { consulta_medica: "medica", consulta_odontologica: "odontologica" };
+
+export function areaClinica(categoria) {
+  return AREA_POR_CATEGORIA[categoria] ?? null;
+}
+
+export function ehConsulta(categoria) {
+  return areaClinica(categoria) !== null;
+}
+
+/**
+ * Período do ciclo odontológico (US-089).
+ * - semestre_civil: `ciclo` = "AAAA-S" (S = 1 jan–jun, 2 jul–dez); padrão = semestre da data de referência.
+ * - dias_corridos: janela de `dias` dias terminando na data de referência (inclusive).
+ * Lança Error com `campo` quando o parâmetro não serve para o modo configurado.
+ */
+export function periodoDoCiclo(config, { ciclo, referencia }, hoje) {
+  const ref = referencia ?? hoje;
+  if (config.modo === "dias_corridos") {
+    if (ciclo) throw Object.assign(new Error("O ciclo AAAA-S só vale no modo semestre_civil; use referencia."), { campo: "ciclo" });
+    const dias = Number(config.dias);
+    return { modo: "dias_corridos", rotulo: `${dias} dias até ${ref}`, inicio: somarDias(ref, -(dias - 1)), fim: ref };
+  }
+  let ano;
+  let semestre;
+  if (ciclo) {
+    const m = /^(\d{4})-([12])$/.exec(ciclo);
+    if (!m) throw Object.assign(new Error("Use o ciclo no formato AAAA-S, com S = 1 ou 2 (ex.: 2026-2)."), { campo: "ciclo" });
+    ano = Number(m[1]);
+    semestre = Number(m[2]);
+  } else {
+    ano = Number(ref.slice(0, 4));
+    semestre = Number(ref.slice(5, 7)) <= 6 ? 1 : 2;
+  }
+  return {
+    modo: "semestre_civil",
+    rotulo: `${ano}-${semestre}`,
+    inicio: semestre === 1 ? `${ano}-01-01` : `${ano}-07-01`,
+    fim: semestre === 1 ? `${ano}-06-30` : `${ano}-12-31`,
+  };
+}

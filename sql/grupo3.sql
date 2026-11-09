@@ -15,6 +15,10 @@ CREATE TYPE categoria_atendimento AS ENUM (
 CREATE TYPE status_agendamento AS ENUM ('agendado','realizado','nao_realizado','cancelado');
 CREATE TYPE situacao_escala AS ENUM ('prevista','confirmada','cancelada');
 CREATE TYPE situacao_presenca AS ENUM ('presente','ausente');
+CREATE TYPE area_clinica AS ENUM ('medica','odontologica');
+CREATE TYPE status_registro_clinico AS ENUM ('rascunho','finalizado');
+CREATE TYPE situacao_acompanhamento AS ENUM ('em_tratamento','em_acompanhamento','concluido','suspenso');
+CREATE TYPE area_tratamento_externo AS ENUM ('medica','odontologica','outra');
 CREATE TYPE status_lembrete AS ENUM ('pendente','enviado','entregue','falha','sem_destinatario','cancelado');
 
 -- Regras configuráveis do grupo (chave/valor). Ver docs/grupo3/decisoes-pendentes.md.
@@ -27,7 +31,9 @@ CREATE TABLE configuracao (
 INSERT INTO configuracao (chave, valor, descricao) VALUES
   ('fuso_horario', '"America/Sao_Paulo"', 'Fuso da instituição para dia/semana/mês.'),
   ('lembretes.antecedencias_min', '[1440]', 'Antecedências padrão dos lembretes, em minutos (tipo sem configuração própria).'),
-  ('lembretes.max_tentativas', '3', 'Tentativas de envio antes de marcar o lembrete como falha.');
+  ('lembretes.max_tentativas', '3', 'Tentativas de envio antes de marcar o lembrete como falha.'),
+  ('odontologia.ciclo', '{"modo": "semestre_civil", "dias": 180}',
+   'Ciclo do acompanhamento odontológico (US-089): semestre_civil (jan–jun / jul–dez) ou dias_corridos.');
 
 CREATE FUNCTION fuso_horario() RETURNS text LANGUAGE sql STABLE SET search_path = grupo3, pg_catalog AS $$
   SELECT coalesce((SELECT valor #>> '{}' FROM configuracao WHERE chave = 'fuso_horario'), 'America/Sao_Paulo')
@@ -322,6 +328,103 @@ CREATE UNIQUE INDEX indice_presenca_escala ON presenca (escala_id) WHERE escala_
 CREATE TRIGGER marcar_atualizacao_presenca BEFORE UPDATE ON presenca
   FOR EACH ROW EXECUTE FUNCTION marcar_atualizacao();
 CREATE TRIGGER impedir_exclusao_presenca BEFORE DELETE ON presenca
+  FOR EACH ROW EXECUTE FUNCTION impedir_exclusao();
+
+-- Acompanhamento odontológico (US-087): plano periódico e situação do tratamento. Um ativo por idoso.
+CREATE TABLE acompanhamento_odontologico (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  idoso_ref uuid NOT NULL,
+  responsavel_id uuid REFERENCES colaborador(id),
+  plano text NOT NULL CHECK (char_length(btrim(plano)) BETWEEN 5 AND 4000),
+  periodicidade_dias integer NOT NULL CHECK (periodicidade_dias BETWEEN 7 AND 730),
+  proxima_avaliacao date,
+  situacao situacao_acompanhamento NOT NULL DEFAULT 'em_acompanhamento',
+  observacoes text CHECK (observacoes IS NULL OR char_length(observacoes) <= 2000),
+  criado_por_ref uuid NOT NULL,
+  criado_em timestamptz NOT NULL DEFAULT now(),
+  atualizado_em timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX indice_acompanhamento_ativo ON acompanhamento_odontologico (idoso_ref)
+  WHERE situacao IN ('em_tratamento','em_acompanhamento');
+CREATE TRIGGER marcar_atualizacao_acompanhamento BEFORE UPDATE ON acompanhamento_odontologico
+  FOR EACH ROW EXECUTE FUNCTION marcar_atualizacao();
+CREATE TRIGGER impedir_exclusao_acompanhamento BEFORE DELETE ON acompanhamento_odontologico
+  FOR EACH ROW EXECUTE FUNCTION impedir_exclusao();
+
+-- Registro clínico de consulta (US-086, US-087). rascunho -> finalizado; finalizado não é editado:
+-- correção é um adendo (registro novo com adendo_de). Conteúdo além dos campos mínimos em jsonb.
+CREATE TABLE registro_clinico (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  agendamento_id uuid REFERENCES agendamento(id),
+  adendo_de uuid REFERENCES registro_clinico(id),
+  acompanhamento_id uuid REFERENCES acompanhamento_odontologico(id),
+  idoso_ref uuid NOT NULL,
+  area area_clinica NOT NULL,
+  profissional_id uuid NOT NULL REFERENCES colaborador(id),
+  tipo text NOT NULL CHECK (char_length(btrim(tipo)) BETWEEN 2 AND 80),
+  realizado_em timestamptz NOT NULL,
+  resumo text NOT NULL CHECK (char_length(btrim(resumo)) BETWEEN 5 AND 8000),
+  conteudo jsonb NOT NULL DEFAULT '{}' CHECK (jsonb_typeof(conteudo) = 'object' AND octet_length(conteudo::text) <= 20000),
+  status status_registro_clinico NOT NULL DEFAULT 'rascunho',
+  autor_ref uuid NOT NULL,
+  finalizado_em timestamptz,
+  finalizado_por_ref uuid,
+  publicacao_status text CHECK (publicacao_status IS NULL OR publicacao_status IN ('publicado','pendente_integracao','falha')),
+  prontuario_ref text,
+  criado_em timestamptz NOT NULL DEFAULT now(),
+  atualizado_em timestamptz NOT NULL DEFAULT now(),
+  CHECK ((status = 'finalizado') = (finalizado_em IS NOT NULL AND finalizado_por_ref IS NOT NULL)),
+  -- Adendo nasce finalizado e aponta para um registro (que não é outro adendo).
+  CHECK (adendo_de IS NULL OR status = 'finalizado'),
+  CHECK (adendo_de IS NULL OR adendo_de <> id)
+);
+-- Um registro principal por consulta.
+CREATE UNIQUE INDEX indice_registro_por_agendamento ON registro_clinico (agendamento_id)
+  WHERE agendamento_id IS NOT NULL AND adendo_de IS NULL;
+CREATE INDEX indice_registro_idoso ON registro_clinico (idoso_ref, area, realizado_em DESC);
+CREATE INDEX indice_registro_adendo ON registro_clinico (adendo_de) WHERE adendo_de IS NOT NULL;
+
+-- Finalizado é imutável; só a situação da publicação no prontuário pode ser atualizada depois.
+CREATE FUNCTION proteger_registro_clinico() RETURNS trigger LANGUAGE plpgsql SET search_path = grupo3, pg_catalog AS $$
+BEGIN
+  IF OLD.status = 'finalizado' AND (
+       (NEW.agendamento_id, NEW.adendo_de, NEW.acompanhamento_id, NEW.idoso_ref, NEW.area, NEW.profissional_id, NEW.tipo,
+        NEW.realizado_em, NEW.resumo, NEW.conteudo, NEW.status, NEW.autor_ref, NEW.finalizado_em, NEW.finalizado_por_ref,
+        NEW.criado_em)
+       IS DISTINCT FROM
+       (OLD.agendamento_id, OLD.adendo_de, OLD.acompanhamento_id, OLD.idoso_ref, OLD.area, OLD.profissional_id, OLD.tipo,
+        OLD.realizado_em, OLD.resumo, OLD.conteudo, OLD.status, OLD.autor_ref, OLD.finalizado_em, OLD.finalizado_por_ref,
+        OLD.criado_em)) THEN
+    RAISE EXCEPTION 'Registro clínico finalizado não pode ser alterado; registre um adendo.';
+  END IF;
+  NEW.atualizado_em := now();
+  RETURN NEW;
+END $$;
+CREATE TRIGGER proteger_registro_clinico_antes_de_atualizar BEFORE UPDATE ON registro_clinico
+  FOR EACH ROW EXECUTE FUNCTION proteger_registro_clinico();
+CREATE TRIGGER impedir_exclusao_registro_clinico BEFORE DELETE ON registro_clinico
+  FOR EACH ROW EXECUTE FUNCTION impedir_exclusao();
+
+-- Tratamento realizado fora da instituição (US-088). Ligado ao idoso; agendamento opcional.
+CREATE TABLE tratamento_externo (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  idoso_ref uuid NOT NULL,
+  agendamento_id uuid REFERENCES agendamento(id),
+  area area_tratamento_externo NOT NULL,
+  tipo text NOT NULL CHECK (char_length(btrim(tipo)) BETWEEN 2 AND 120),
+  local_externo text NOT NULL CHECK (char_length(btrim(local_externo)) BETWEEN 2 AND 160),
+  data date NOT NULL,
+  profissional_nome text CHECK (profissional_nome IS NULL OR char_length(profissional_nome) <= 160),
+  instituicao text CHECK (instituicao IS NULL OR char_length(instituicao) <= 160),
+  observacoes text CHECK (observacoes IS NULL OR char_length(observacoes) <= 4000),
+  criado_por_ref uuid NOT NULL,
+  criado_em timestamptz NOT NULL DEFAULT now(),
+  atualizado_em timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX indice_tratamento_externo_idoso ON tratamento_externo (idoso_ref, area, data DESC);
+CREATE TRIGGER marcar_atualizacao_tratamento_externo BEFORE UPDATE ON tratamento_externo
+  FOR EACH ROW EXECUTE FUNCTION marcar_atualizacao();
+CREATE TRIGGER impedir_exclusao_tratamento_externo BEFORE DELETE ON tratamento_externo
   FOR EACH ROW EXECUTE FUNCTION impedir_exclusao();
 
 COMMIT;

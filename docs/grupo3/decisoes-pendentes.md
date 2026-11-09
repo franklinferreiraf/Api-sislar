@@ -12,7 +12,8 @@ Cada linha registra o que foi assumido e onde está no código, para trocar sem 
 | **D-013** | Relatórios obrigatórios | Relatórios P2 viram endpoints JSON com filtros; exportação PDF/planilha fica com o Grupo 5. | Fatia 7 |
 | **D-017** | Infraestrutura de produção | Conexão, segredo, CORS e porta vêm de variáveis de ambiente (`DATABASE_URL`, `JWT_SECRET`, `CORS_ORIGIN`, `PORT`). Os jobs da Fatia 2 serão ligados por `JOBS_ENABLED`. | `src/config.js`, `.env.example` |
 | US-076 | Campos da atividade de fisioterapia | Campos fixos (descrição, frequência, duração, observações) + `configuracao jsonb` validado por zod (chaves livres, tamanho limitado). | Fatia 5 |
-| US-086 | Conteúdo do registro de consulta | Campos mínimos (profissional, data/hora, tipo, resumo/resultado) + `conteudo jsonb` validado. | Fatia 4 |
+| US-086 | Conteúdo do registro de consulta | Campos mínimos (profissional, data/hora, tipo, resumo/resultado) + `conteudo` jsonb: objeto plano, até 50 chaves, valores texto/número/booleano/nulo/lista curta, até 20 KB. | `conteudoFlexivel` em `src/grupo3/validacao.js`; `grupo3.registro_clinico.conteudo` |
+| **D-004** | Correção de registro clínico | **Depende da D-004.** Registro clínico `rascunho → finalizado`; finalizado não aceita edição (gatilho `proteger_registro_clinico`). Correção só por **adendo**: registro novo, finalizado, vinculado por `adendo_de`, com autor e data, também publicado no prontuário. Adendo de adendo vai para o original. Se a D-004 definir outro modelo (ex.: retificação com motivo, como na evolução do Grupo 1), o adendo é o ponto a trocar. | `POST /api/registros-clinicos/{id}/adendos` em `src/routes/grupo3/clinico.js` |
 
 ## Regras configuráveis
 
@@ -22,7 +23,7 @@ Cada linha registra o que foi assumido e onde está no código, para trocar sem 
 | Motivo obrigatório ao reagendar | Ligado (`true`) | `grupo3.tipo_atendimento.exige_motivo_reagendamento`, por tipo |
 | Exceção à regra de conflito | Desligada | `grupo3.tipo_atendimento.permite_sobreposicao`. Só vale entre agendamentos do **mesmo tipo**; tipos diferentes sempre conflitam |
 | Fuso da instituição | `America/Sao_Paulo` | `grupo3.configuracao`, chave `fuso_horario` |
-| **Ciclo do acompanhamento odontológico** | `semestre_civil` (jan–jun / jul–dez) | Fatia 4: `grupo3.configuracao`, chave `odontologia.ciclo` = `{ "modo": "semestre_civil" \| "dias_corridos", "dias": 180 }`. `GET /api/odontologia/pendencias?ciclo=AAAA-S` (ex.: `2026-2`) no modo semestre civil; em `dias_corridos`, o ciclo é contado da data de referência para trás |
+| **Ciclo do acompanhamento odontológico** | `semestre_civil` (jan–jun / jul–dez) | `grupo3.configuracao`, chave `odontologia.ciclo` = `{ "modo": "semestre_civil" \| "dias_corridos", "dias": 180 }`, alterável em `PUT /api/odontologia/configuracao-ciclo` (`atendimento-clinico.administrar`). `GET /api/odontologia/pendencias?ciclo=AAAA-S` (ex.: `2026-2`) no modo semestre civil; em `dias_corridos`, janela de `dias` até `?referencia=` (padrão: hoje). `ciclo` no modo dias corridos é 422 |
 | Tolerância para registrar a realização | 60 min antes do início | `grupo3.tipo_atendimento.tolerancia_realizacao_min`, por tipo (0 a 1440) |
 | Antecedência dos lembretes | 24 h (`[1440]`) | Padrão: `grupo3.configuracao`, chave `lembretes.antecedencias_min`. Por tipo: `grupo3.tipo_atendimento.antecedencias_lembrete_min` (`null` usa o padrão; `[]` desliga). Mudar a configuração não altera lembretes já gerados |
 | Tentativas de envio | 3 | `grupo3.configuracao`, chave `lembretes.max_tentativas` |
@@ -53,6 +54,14 @@ Cada linha registra o que foi assumido e onde está no código, para trocar sem 
 | Presença | **Registro operacional, não substitui o controle de ponto.** Só para hoje ou datas passadas, de colaborador ativo. Uma presença em aberto (sem saída) por colaborador, em qualquer data (o plantão noturno fica aberto na virada do dia). A justificativa da ausência é opcional. Registro só pela gestão (`equipe.criar`); leitura com `equipe.visualizar`. | `src/routes/grupo3/presencas.js` |
 | Escala cancelada | Motivo opcional, guardado em `motivo_cancelamento`. Situação `cancelada` é final. | `PATCH /api/escalas/{id}/situacao` |
 | Leitura de escalas e lacunas | Também para quem tem `agenda.visualizar` ou `atendimento-clinico.visualizar` (saber quem está escalado), sem contatos. | `VER` em `src/routes/grupo3/escalas.js` |
+| Publicação no prontuário | A evolução do Grupo 1 já existe: o registro finalizado vira evolução `finalizado`, tipo `reavaliacao` (o catálogo do G1 não tem "consulta"), com título indicando a origem e o registro do G3 nas notas. Escrita direta em `public.evolutions` pela porta, na mesma transação; o perfil odontologia publica mesmo sem `evolucao.create` (integração de sistema). | `publicarNoProntuario()` em `src/grupo3/portas/prontuario.js` |
+| Finalizar registro clínico | Exige consulta `realizado`. Rascunho pode ser aberto para consulta agendada (ex.: anotações prévias). Consulta cancelada ou não realizada não recebe registro. | `src/routes/grupo3/clinico.js` |
+| Quem edita o rascunho | Só o autor, ou quem tem `atendimento-clinico.administrar`. | `exigirAutorOuAdmin()` |
+| Consulta fora da escala | Aceita com aviso `fora_da_escala` (não bloqueia). Consulta exige `local`. | `avisosDeEscala()` em `src/routes/grupo3/agendamentos.js` |
+| Registro que conta no ciclo | Registro clínico odontológico **finalizado** ou tratamento externo odontológico com data dentro do ciclo. | `GET /api/odontologia/pendencias` |
+| Acompanhamento ativo | No máximo um por idoso (`em_tratamento` ou `em_acompanhamento`); periodicidade padrão 180 dias. | Índice `indice_acompanhamento_ativo` |
+| Tratamento externo | Só com data de hoje ou passada (é registro do que foi feito); o idoso não pode ser trocado na edição. | `validarTratamento()` |
+| Auditoria de leitura | Ler registro clínico, acompanhamento, tratamento externo e pendências é auditado com usuário, data/hora, idosos e registros; listas guardam até 200 ids. | `src/grupo3/auditoria.js` |
 | Formato de erro | Mantido o do repositório, `{ error: { message, details } }`, e não ProblemDetails. | `src/middleware/error.js` |
 | Base dos paths | `/api`, sem `/v1`, como o resto da API. | `src/routes/grupo3/index.js` |
 | Migrations | O repositório não tem migrations incrementais: `db:setup` recria o banco a partir de `sql/*.sql`. O schema do G3 é `sql/grupo3.sql`. Migração incremental é decisão da Fundação. | `src/db/reset.js` |

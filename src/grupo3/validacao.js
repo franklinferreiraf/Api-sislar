@@ -39,3 +39,18 @@ export function validarIntervalo(inicio, fim) {
     throw new HttpError(422, "Dados inválidos", [{ path: "fim", message: "O fim precisa ser depois do início." }]);
   }
 }
+
+// Conteúdo clínico flexível (US-076/US-086): o formulário ainda não foi definido pela instituição.
+// Objeto plano com até 50 chaves; valores texto, número, booleano, nulo ou lista curta de texto/número.
+const valorConteudo = z.union([
+  z.string().max(4000),
+  z.number().finite(),
+  z.boolean(),
+  z.null(),
+  z.array(z.union([z.string().max(500), z.number().finite()])).max(50),
+]);
+export const conteudoFlexivel = z.record(
+  z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,59}$/, "Chave inválida (use letras, números e _)."),
+  valorConteudo,
+).refine((obj) => Object.keys(obj).length <= 50, "No máximo 50 campos.")
+  .refine((obj) => JSON.stringify(obj).length <= 20000, "Conteúdo acima de 20 KB.");

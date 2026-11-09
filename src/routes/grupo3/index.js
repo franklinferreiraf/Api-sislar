@@ -2,6 +2,7 @@
 import { Router } from "express";
 import { requireAuth } from "../../middleware/auth.js";
 import agendamentosRouter from "./agendamentos.js";
+import clinicoRouter from "./clinico.js";
 import colaboradoresRouter from "./colaboradores.js";
 import escalasRouter from "./escalas.js";
 import especialidadesRouter from "./especialidades.js";
@@ -18,5 +19,6 @@ router.use(agendamentosRouter);
 router.use(especialidadesRouter);
 router.use(escalasRouter);
 router.use(presencasRouter);
+router.use(clinicoRouter);
 
 export default router;

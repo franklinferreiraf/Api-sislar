@@ -289,6 +289,89 @@ const exemploPresenca = {
   atualizadoEm: "2026-11-10T10:00:00.000Z",
 };
 
+const exemploRegistro = {
+  id: "9b0c1d2e-3f4a-4b5c-8d6e-7f8a9b0c1d2e",
+  agendamentoId: exemploAgendamento.id,
+  adendoDe: null,
+  acompanhamentoId: null,
+  idoso: { id: "p09", nome: "José Almeida" },
+  area: "medica",
+  profissional: { id: exemploColaborador.id, nome: "Dr. Paulo Ferraz Neto" },
+  tipo: "Consulta médica",
+  realizadoEm: "2026-11-10T12:00:00.000Z",
+  resumo: "Paciente estável, sem queixas. PA controlada.",
+  conteudo: { pressaoArterial: "12x8", conduta: "Manter medicação", retornoDias: 90 },
+  status: "finalizado",
+  autor: { id: "s05", nome: "Dr. Paulo Ferraz Neto" },
+  finalizadoEm: "2026-11-10T12:40:00.000Z",
+  finalizadoPor: { id: "s05", nome: "Dr. Paulo Ferraz Neto" },
+  publicacao: { status: "publicado", prontuarioRef: "e3f4a5b6-0000-4000-8000-000000000001" },
+  criadoEm: "2026-11-10T12:30:00.000Z",
+  atualizadoEm: "2026-11-10T12:40:00.000Z",
+};
+const conteudoClinico = {
+  type: "object",
+  additionalProperties: { oneOf: [{ type: "string", maxLength: 4000 }, { type: "number" }, { type: "boolean" }, { type: "array", maxItems: 50, items: { oneOf: [{ type: "string" }, { type: "number" }] } }], nullable: true },
+  maxProperties: 50,
+  description: "Conteúdo definido pela instituição (pendente): objeto plano, até 50 chaves `[A-Za-z][A-Za-z0-9_]*`, até 20 KB.",
+};
+const leituraAuditada = "A leitura é auditada (`audit_log`: usuário, data/hora, idosos acessados).";
+const exemploAcompanhamento = {
+  id: "0c1d2e3f-4a5b-4c6d-9e7f-8a9b0c1d2e3f",
+  idoso: { id: "p03", nome: "Maria da Silva" },
+  responsavel: { id: exemploColaborador.id, nome: "Dra. Luciana Prado" },
+  plano: "Revisão de prótese e higiene oral a cada seis meses.",
+  periodicidadeDias: 180,
+  proximaAvaliacao: "2027-04-01",
+  situacao: "em_acompanhamento",
+  observacoes: null,
+  ultimoRegistroEm: "2026-10-20T17:00:00.000Z",
+  criadoEm: "2026-10-20T17:00:00.000Z",
+  atualizadoEm: "2026-10-20T17:00:00.000Z",
+};
+const corpoAcompanhamento = {
+  type: "object",
+  required: ["plano"],
+  properties: {
+    responsavelId: { ...uuid, nullable: true },
+    plano: { type: "string", minLength: 5, maxLength: 4000 },
+    periodicidadeDias: { type: "integer", minimum: 7, maximum: 730, default: 180 },
+    proximaAvaliacao: { ...dataDia, nullable: true },
+    situacao: { type: "string", enum: ["em_tratamento", "em_acompanhamento", "concluido", "suspenso"], default: "em_acompanhamento" },
+    observacoes: { type: "string", maxLength: 2000, nullable: true },
+  },
+};
+const exemploTratamento = {
+  id: "1d2e3f4a-5b6c-4d7e-8f90-a1b2c3d4e5f6",
+  idoso: { id: "p05", nome: "Ana Souza" },
+  agendamentoId: null,
+  area: "odontologica",
+  tipo: "Extração dentária",
+  localExterno: "Centro de Especialidades Odontológicas",
+  data: "2026-10-10",
+  profissionalNome: null,
+  instituicao: "CEO Municipal",
+  observacoes: "Sem intercorrências.",
+  registradoPor: { id: "s01", nome: "Marta Oliveira Lima" },
+  criadoEm: "2026-10-10T18:00:00.000Z",
+  atualizadoEm: "2026-10-10T18:00:00.000Z",
+};
+const corpoTratamento = {
+  type: "object",
+  required: ["idosoId", "area", "tipo", "localExterno", "data"],
+  properties: {
+    idosoId,
+    agendamentoId: { ...uuid, nullable: true, description: "Opcional; precisa ser do mesmo idoso." },
+    area: { type: "string", enum: ["medica", "odontologica", "outra"] },
+    tipo: { type: "string", minLength: 2, maxLength: 120 },
+    localExterno: { type: "string", minLength: 2, maxLength: 160 },
+    data: { ...dataDia, description: "Hoje ou passado." },
+    profissionalNome: { type: "string", maxLength: 160, nullable: true },
+    instituicao: { type: "string", maxLength: 160, nullable: true },
+    observacoes: { type: "string", maxLength: 4000, nullable: true },
+  },
+};
+
 const lgpd = "Em consultas, fisioterapia e avaliações, `observacoes`, `motivoStatus` e `observacaoRealizacao` voltam `null` "
   + "com `conteudoRestrito: true` para quem não tem a permissão clínica (`atendimento-clinico.visualizar` ou "
   + "`fisioterapia.visualizar`), exceto o próprio profissional do agendamento.";
@@ -299,6 +382,7 @@ export const tagsGrupo3 = [
   { name: "G3 · Equipe", description: "US-082, US-091, US-092, US-093. Cadastro único de colaboradores, disponibilidade e presença." },
   { name: "G3 · Escalas", description: "US-083, US-084. Escala de atendimento (planejado), cobertura necessária e lacunas." },
   { name: "G3 · Especialidades", description: "Catálogo de especialidades/áreas usado por colaborador, escala e cobertura." },
+  { name: "G3 · Atendimento clínico", description: "US-085 a US-089. Registro clínico de consulta (rascunho → finalizado, correção por adendo), acompanhamento odontológico, tratamento externo e pendências do ciclo. Toda leitura é auditada." },
 ];
 
 export const pathsGrupo3 = {
@@ -583,9 +667,9 @@ export const pathsGrupo3 = {
         },
       },
       bodyExample: { idosoId: "p02", tipoId: exemploTipo.id, profissionalId: exemploColaborador.id, inicio: "2026-11-10T14:00:00-03:00", local: "Sala de fisioterapia", observacoes: "Treino de marcha com andador." },
-      example: exemploAgendamento,
+      example: { ...exemploAgendamento, avisos: [{ codigo: "fora_da_escala", mensagem: "O profissional não está na escala nesse horário." }] },
       conflictExample: exemploConflito,
-      description: "Valida idoso, tipo ativo e profissional ativo. Recusa com 409 e a lista de conflitos se o profissional já tiver agendamento ativo sobreposto (exceto mesmo tipo com sobreposição permitida).",
+      description: "Valida idoso, tipo ativo e profissional ativo. Recusa com 409 e a lista de conflitos se o profissional já tiver agendamento ativo sobreposto (exceto mesmo tipo com sobreposição permitida). US-085: consulta médica ou odontológica exige `local` (422) e, fora da escala do profissional, é aceita com aviso `fora_da_escala` em `avisos`.",
     }),
   },
   "/api/agendamentos/verificar-conflitos": {
@@ -600,7 +684,7 @@ export const pathsGrupo3 = {
         },
       },
       bodyExample: { profissionalId: exemploColaborador.id, tipoId: exemploTipo.id, inicio: "2026-11-10T14:20:00-03:00" },
-      example: { temConflito: true, inicio: "2026-11-10T17:20:00.000Z", fim: "2026-11-10T18:00:00.000Z", conflitos: exemploConflito.error.details.conflitos },
+      example: { temConflito: true, inicio: "2026-11-10T17:20:00.000Z", fim: "2026-11-10T18:00:00.000Z", conflitos: exemploConflito.error.details.conflitos, avisos: [] },
     }),
   },
   "/api/agendamentos/{id}": {
@@ -623,7 +707,7 @@ export const pathsGrupo3 = {
       },
       bodyExample: { inicio: "2026-11-11T09:00:00-03:00", motivo: "Atraso do transporte" },
       errors: [404],
-      example: { ...exemploAgendamento, inicio: "2026-11-11T12:00:00.000Z", fim: "2026-11-11T12:40:00.000Z" },
+      example: { ...exemploAgendamento, inicio: "2026-11-11T12:00:00.000Z", fim: "2026-11-11T12:40:00.000Z", avisos: [] },
       conflictExample: exemploConflito,
       description: "Mantém o mesmo registro e grava anterior → novo no histórico. Revalida conflito ignorando o próprio agendamento. 409 também quando o agendamento já foi encerrado.",
     }),
@@ -744,6 +828,147 @@ export const pathsGrupo3 = {
         }],
       },
       description: "US-071. Para cada serviço de cuidado pessoal já agendado para o idoso: total realizado, última realização (com responsável) e próximo agendamento.",
+    }),
+  },
+  "/api/agendamentos/{id}/registro-clinico": {
+    post: op("G3 · Atendimento clínico", "Registrar consulta (rascunho ou finalizado)", "atendimento-clinico.criar", {
+      status: 201,
+      params: [path("id")],
+      body: {
+        type: "object", required: ["resumo"],
+        properties: {
+          tipo: { type: "string", minLength: 2, maxLength: 80, nullable: true, description: "Padrão: nome do tipo de atendimento." },
+          resumo: { type: "string", minLength: 10, maxLength: 8000, description: "Resumo/resultado da consulta." },
+          conteudo: conteudoClinico,
+          realizadoEm: { ...dataHora, description: "Padrão: início do agendamento." },
+          acompanhamentoId: { ...uuid, nullable: true, description: "Só consulta odontológica; acompanhamento do mesmo idoso." },
+          finalizar: { type: "boolean", default: false, description: "Cria já finalizado (exige consulta realizada)." },
+        },
+      },
+      bodyExample: { resumo: "Paciente estável, sem queixas.", conteudo: { pressaoArterial: "13x8", conduta: "Manter medicação" } },
+      errors: [404],
+      example: { ...exemploRegistro, status: "rascunho", finalizadoEm: null, finalizadoPor: null, publicacao: null, adendos: [] },
+      conflictExample: erro("Esta consulta já tem registro clínico. Edite o rascunho ou registre um adendo."),
+      description: "Só para consulta médica ou odontológica (422 nos outros tipos). Um registro principal por consulta (409). Consulta cancelada ou não realizada não recebe registro (409). Ao finalizar, o registro é publicado no prontuário do idoso como evolução finalizada (adaptador real da US-023).",
+    }),
+    get: op("G3 · Atendimento clínico", "Registro clínico da consulta (com adendos)", "atendimento-clinico.visualizar", {
+      params: [path("id")], errors: [404], example: { ...exemploRegistro, adendos: [] }, description: leituraAuditada,
+    }),
+  },
+  "/api/registros-clinicos/{id}": {
+    get: op("G3 · Atendimento clínico", "Detalhe do registro clínico (com adendos)", "atendimento-clinico.visualizar", {
+      params: [path("id")], errors: [404], example: { ...exemploRegistro, adendos: [] }, description: leituraAuditada,
+    }),
+    put: op("G3 · Atendimento clínico", "Editar rascunho", "atendimento-clinico.editar (autor ou atendimento-clinico.administrar)", {
+      params: [path("id")],
+      body: {
+        type: "object", required: ["resumo"],
+        properties: {
+          tipo: { type: "string", minLength: 2, maxLength: 80, nullable: true },
+          resumo: { type: "string", minLength: 10, maxLength: 8000 },
+          conteudo: conteudoClinico,
+          realizadoEm: dataHora,
+          acompanhamentoId: { ...uuid, nullable: true },
+        },
+      },
+      errors: [404],
+      example: { ...exemploRegistro, status: "rascunho", finalizadoEm: null, finalizadoPor: null, publicacao: null, adendos: [] },
+      conflictExample: erro("Registro finalizado não é editado; registre um adendo."),
+      description: "Só rascunho; finalizado é imutável (também no banco).",
+    }),
+  },
+  "/api/registros-clinicos/{id}/finalizar": {
+    post: op("G3 · Atendimento clínico", "Finalizar e publicar no prontuário", "atendimento-clinico.editar (autor ou atendimento-clinico.administrar)", {
+      params: [path("id")], errors: [404, 409], example: { ...exemploRegistro, adendos: [] },
+      description: "Exige a consulta realizada (409). Publica uma evolução finalizada no prontuário do idoso e guarda a referência em `publicacao`.",
+    }),
+  },
+  "/api/registros-clinicos/{id}/adendos": {
+    post: op("G3 · Atendimento clínico", "Corrigir por adendo", "atendimento-clinico.criar", {
+      status: 201,
+      params: [path("id")],
+      body: { type: "object", required: ["resumo"], properties: { resumo: { type: "string", minLength: 10, maxLength: 8000 }, conteudo: conteudoClinico } },
+      bodyExample: { resumo: "Adendo: paciente relatou tontura leve ao levantar." },
+      errors: [404, 409],
+      example: {
+        ...exemploRegistro,
+        adendos: [{ ...exemploRegistro, id: "2e3f4a5b-6c7d-4e8f-9a0b-c1d2e3f4a5b6", adendoDe: exemploRegistro.id, resumo: "Adendo: paciente relatou tontura leve ao levantar.", conteudo: {}, realizadoEm: "2026-11-11T13:00:00.000Z" }],
+      },
+      description: "Correção de registro finalizado (D-004): cria um registro novo, finalizado, vinculado ao original (`adendoDe`), com autor e data, e publicado no prontuário. Adendo de adendo vai para o registro original. Rascunho não recebe adendo (409). Devolve o registro original com todos os adendos.",
+    }),
+  },
+  "/api/idosos/{idosoId}/registros-clinicos": {
+    get: op("G3 · Atendimento clínico", "Registros clínicos do idoso", "atendimento-clinico.visualizar", {
+      params: [path("idosoId", idosoId)],
+      query: [...pagina, query("area", { type: "string", enum: ["medica", "odontologica"] }), query("status", { type: "string", enum: ["rascunho", "finalizado"] }), query("inicio", dataHora), query("fim", dataHora)],
+      errors: [404],
+      example: { idoso: { id: "p09", nome: "José Almeida" }, ...lista(exemploRegistro) },
+      description: `Só registros principais (os adendos vêm no detalhe). ${leituraAuditada}`,
+    }),
+  },
+  "/api/odontologia/acompanhamentos": {
+    get: op("G3 · Atendimento clínico", "Listar acompanhamentos odontológicos", "atendimento-clinico.visualizar", {
+      query: [...pagina, query("idosoId", idosoId), query("situacao", { type: "string", enum: ["em_tratamento", "em_acompanhamento", "concluido", "suspenso"] })],
+      example: lista(exemploAcompanhamento), description: leituraAuditada,
+    }),
+    post: op("G3 · Atendimento clínico", "Cadastrar acompanhamento odontológico", "atendimento-clinico.criar", {
+      status: 201,
+      body: { ...corpoAcompanhamento, required: ["idosoId", "plano"], properties: { idosoId, ...corpoAcompanhamento.properties } },
+      bodyExample: { idosoId: "p03", plano: "Revisão de prótese e higiene oral a cada seis meses.", periodicidadeDias: 180, proximaAvaliacao: "2027-04-01" },
+      example: exemploAcompanhamento,
+      conflictExample: erro("O idoso já tem acompanhamento odontológico ativo."),
+      description: "Um acompanhamento ativo (`em_tratamento` ou `em_acompanhamento`) por idoso (409).",
+    }),
+  },
+  "/api/odontologia/acompanhamentos/{id}": {
+    get: op("G3 · Atendimento clínico", "Detalhe do acompanhamento", "atendimento-clinico.visualizar", { params: [path("id")], errors: [404], example: exemploAcompanhamento, description: leituraAuditada }),
+    put: op("G3 · Atendimento clínico", "Atualizar plano e situação", "atendimento-clinico.editar", {
+      params: [path("id")], body: corpoAcompanhamento, errors: [404], example: { ...exemploAcompanhamento, situacao: "concluido" },
+      conflictExample: erro("O idoso já tem acompanhamento odontológico ativo."),
+    }),
+  },
+  "/api/tratamentos-externos": {
+    get: op("G3 · Atendimento clínico", "Listar tratamentos externos", "atendimento-clinico.visualizar", {
+      query: [...pagina, query("idosoId", idosoId), query("area", { type: "string", enum: ["medica", "odontologica", "outra"] }), query("inicio", dataDia), query("fim", dataDia)],
+      example: lista(exemploTratamento), description: leituraAuditada,
+    }),
+    post: op("G3 · Atendimento clínico", "Registrar tratamento externo", "atendimento-clinico.criar", {
+      status: 201, body: corpoTratamento,
+      bodyExample: { idosoId: "p05", area: "odontologica", tipo: "Extração dentária", localExterno: "Centro de Especialidades Odontológicas", data: "2026-10-10", instituicao: "CEO Municipal" },
+      example: exemploTratamento,
+      description: "Vinculado ao idoso; agendamento opcional (do mesmo idoso). Tratamento odontológico conta para o ciclo da US-089.",
+    }),
+  },
+  "/api/tratamentos-externos/{id}": {
+    get: op("G3 · Atendimento clínico", "Detalhe do tratamento externo", "atendimento-clinico.visualizar", { params: [path("id")], errors: [404], example: exemploTratamento, description: leituraAuditada }),
+    put: op("G3 · Atendimento clínico", "Editar tratamento externo", "atendimento-clinico.editar", {
+      params: [path("id")], body: corpoTratamento, errors: [404], example: exemploTratamento,
+      description: "O idoso não pode ser trocado (422). Sem exclusão física.",
+    }),
+  },
+  "/api/odontologia/pendencias": {
+    get: op("G3 · Atendimento clínico", "Idosos sem registro odontológico no ciclo", "atendimento-clinico.visualizar", {
+      query: [
+        ...pagina,
+        query("ciclo", { type: "string", pattern: "^\\d{4}-[12]$", example: "2026-2" }, "Modo semestre_civil. Padrão: semestre atual."),
+        query("referencia", dataDia, "Modo dias_corridos: fim da janela. Padrão: hoje."),
+      ],
+      example: {
+        ciclo: { modo: "semestre_civil", rotulo: "2026-2", inicio: "2026-07-01", fim: "2026-12-31" },
+        resumo: { totalIdosos: 52, comRegistroNoCiclo: 2, pendentes: 50 },
+        data: [{ idoso: { id: "p12", nome: "Pedro Lima" }, ultimoRegistro: null, acompanhamentoAtivo: "em_tratamento" }],
+        meta: { page: 1, limit: 20, total: 50, pages: 3 },
+      },
+      description: `Conta registro clínico odontológico finalizado ou tratamento externo odontológico dentro do ciclo. O modo vem de \`/api/odontologia/configuracao-ciclo\`. ${leituraAuditada}`,
+    }),
+  },
+  "/api/odontologia/configuracao-ciclo": {
+    get: op("G3 · Atendimento clínico", "Configuração do ciclo odontológico", "atendimento-clinico.visualizar", { example: { modo: "semestre_civil", dias: 180 } }),
+    put: op("G3 · Atendimento clínico", "Alterar o ciclo odontológico", "atendimento-clinico.administrar", {
+      body: { type: "object", required: ["modo"], properties: { modo: { type: "string", enum: ["semestre_civil", "dias_corridos"] }, dias: { type: "integer", minimum: 30, maximum: 730, default: 180 } } },
+      bodyExample: { modo: "dias_corridos", dias: 180 },
+      example: { modo: "dias_corridos", dias: 180 },
+      description: "`semestre_civil` (jan–jun / jul–dez, padrão) ou `dias_corridos` (janela de `dias` até a referência). Auditado.",
     }),
   },
   "/api/idosos/{idosoId}/atendimentos": {

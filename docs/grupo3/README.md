@@ -7,7 +7,7 @@ Backend dos épicos E07 (agenda, cuidados e atendimentos), E08 (fisioterapia), E
 | 1 | `Colaborador` mínimo, US-065, US-066, US-067, US-068, US-069, US-072, US-073 | **Entregue** |
 | 2 | US-070, US-071, US-074 (lembretes + job) | **Entregue** |
 | 3 | US-091, US-092, US-082, US-083, US-084, US-093 | **Entregue** |
-| 4 | US-085 a US-089 | A fazer |
+| 4 | US-085 a US-089 | **Entregue** |
 | 5 | US-075 a US-080 | A fazer |
 | 6 | US-094 a US-096 + indicadores para o Grupo 5 | A fazer |
 | 7 | US-081, US-090 (P2) | A fazer |
@@ -49,7 +49,8 @@ Também dá para gravar `DATABASE_URL` no `.env`; uma variável já definida no 
 | `src/grupo3/portas/` | Portas de integração (`idosos.js`, `prontuario.js`, `notificacoes.js`) |
 | `src/grupo3/lembretes.js` | Geração, cancelamento e envio dos lembretes (US-074) |
 | `src/grupo3/jobs.js` | Agendador dos jobs (`JOBS_ENABLED=true`), chamado por `src/server.js` |
-| `src/routes/grupo3/` | Rotas, montadas em `/api` por `index.js` (`agendamentos`, `tipos-atendimento`, `colaboradores`, `especialidades`, `escalas`, `presencas`) |
+| `src/grupo3/auditoria.js` | Auditoria de leitura de dados clínicos |
+| `src/routes/grupo3/` | Rotas, montadas em `/api` por `index.js` (`agendamentos`, `tipos-atendimento`, `colaboradores`, `especialidades`, `escalas`, `presencas`, `clinico`) |
 | `src/docs/openapi.grupo3.js` | OpenAPI do G3, juntado em `src/docs/openapi.js` |
 | `src/db/seedGrupo3.js` | Dados de demonstração |
 | `tests/grupo3.rules.test.js`, `tests/grupo3.api.test.js` | Testes unitários, de integração e de permissão |
@@ -75,6 +76,12 @@ erDiagram
     COLABORADOR ||--o{ ESCALA : "planejado"
     COLABORADOR ||--o{ PRESENCA : "aconteceu"
     ESCALA |o--o| PRESENCA : "turno previsto (opcional)"
+    AGENDAMENTO |o--o{ REGISTRO_CLINICO : "consulta"
+    REGISTRO_CLINICO |o--o{ REGISTRO_CLINICO : "adendos"
+    ACOMPANHAMENTO_ODONTOLOGICO |o--o{ REGISTRO_CLINICO : "registros"
+    AGENDAMENTO |o--o{ TRATAMENTO_EXTERNO : "opcional"
+    PATIENTS_public ||--o{ TRATAMENTO_EXTERNO : "idoso_ref"
+    PATIENTS_public ||--o{ ACOMPANHAMENTO_ODONTOLOGICO : "idoso_ref"
     USERS_public ||--o| COLABORADOR : "usuario_ref (opcional)"
     PATIENTS_public ||--o{ AGENDAMENTO : "idoso_ref"
 
@@ -132,6 +139,45 @@ erDiagram
         text atividade
         text justificativa
         uuid registrado_por_ref
+    }
+    REGISTRO_CLINICO {
+        uuid id PK
+        uuid agendamento_id FK "um principal por consulta"
+        uuid adendo_de FK "correção por adendo"
+        uuid acompanhamento_id FK
+        uuid idoso_ref
+        enum area "medica | odontologica"
+        uuid profissional_id FK
+        text tipo
+        timestamptz realizado_em
+        text resumo
+        jsonb conteudo "flexível, até 20 KB"
+        enum status "rascunho | finalizado"
+        uuid autor_ref
+        uuid finalizado_por_ref
+        text publicacao_status "publicado | pendente_integracao | falha"
+        text prontuario_ref "public.evolutions.id"
+    }
+    ACOMPANHAMENTO_ODONTOLOGICO {
+        uuid id PK
+        uuid idoso_ref "um ativo por idoso"
+        uuid responsavel_id FK
+        text plano
+        int periodicidade_dias
+        date proxima_avaliacao
+        enum situacao "em_tratamento | em_acompanhamento | concluido | suspenso"
+    }
+    TRATAMENTO_EXTERNO {
+        uuid id PK
+        uuid idoso_ref
+        uuid agendamento_id FK "opcional"
+        enum area "medica | odontologica | outra"
+        text tipo
+        text local_externo
+        date data
+        text profissional_nome
+        text instituicao
+        text observacoes
     }
     TIPO_ATENDIMENTO {
         uuid id PK
@@ -220,6 +266,18 @@ Integridade garantida no banco:
 
 **Lacunas (US-084).** A cobertura mínima (`cobertura_necessaria`) é configurada por especialidade (FK), dia da semana e faixa horária (`24:00` = fim do dia; necessidade noturna em duas faixas). `GET /api/escalas/lacunas` cruza essa necessidade com as escalas `prevista`/`confirmada` de colaboradores ativos da mesma especialidade, recortando cada turno nos dias que ele toca (um plantão 19h–05h conta na noite do primeiro dia e na madrugada do segundo), e devolve os trechos abaixo do mínimo, com quantos estão escalados e quantos faltam.
 
+**Consultas (US-085).** Consulta é um agendamento cujo tipo tem categoria `consulta_medica` ou `consulta_odontologica`. O `local` é obrigatório. Se o profissional não estiver numa escala não cancelada cobrindo todo o horário, o agendamento é aceito com o aviso `fora_da_escala` em `avisos`, sem bloquear. O mesmo aviso aparece no reagendamento e na verificação de conflitos.
+
+**Registro clínico (US-086, US-087).** Resultado da consulta com campos mínimos (profissional, data/hora, tipo, resumo) e `conteudo` flexível em jsonb, validado. Status `rascunho → finalizado`. O rascunho é editado só pelo autor (ou por `atendimento-clinico.administrar`). Finalizar exige a consulta realizada. **Finalizado não aceita edição** (gatilho no banco); a correção é um **adendo**: registro novo, finalizado, vinculado por `adendo_de`, com autor e data. Ao finalizar, o registro (e cada adendo) é publicado no prontuário do idoso como evolução finalizada. Registro odontológico pode apontar para o acompanhamento odontológico do mesmo idoso.
+
+**Acompanhamento odontológico (US-087).** Plano, periodicidade, próxima avaliação, responsável e situação (`em_tratamento`, `em_acompanhamento`, `concluido`, `suspenso`). Cada idoso tem no máximo um acompanhamento ativo.
+
+**Tratamento externo (US-088).** Ligado ao idoso, com agendamento opcional (do mesmo idoso): área, tipo, local externo, data (hoje ou passado), profissional e instituição quando informados, e observações.
+
+**Ciclo odontológico (US-089).** `GET /api/odontologia/pendencias` lista os idosos sem registro odontológico no ciclo: registro clínico odontológico finalizado ou tratamento externo odontológico. O modo é configurável (`grupo3.configuracao`, chave `odontologia.ciclo`): `semestre_civil` (padrão; `?ciclo=AAAA-S`, jan–jun = 1, jul–dez = 2) ou `dias_corridos` (janela de N dias até `?referencia=`).
+
+**Auditoria de leitura.** Ler registro clínico, acompanhamento odontológico, tratamento externo e pendências grava `<entidade>.ler` no `audit_log`, com quem acessou (`user_id`), quando (`at`), quais idosos (`payload.idosos`), quais registros e a rota.
+
 **LGPD.** Nas categorias clínicas (consultas, avaliação e fisioterapia), `observacoes`, `motivoStatus` e `observacaoRealizacao` voltam `null`, com `conteudoRestrito: true`, para quem não tem `atendimento-clinico.visualizar` (consultas e avaliação) ou `fisioterapia.visualizar`. A exceção é o próprio profissional do agendamento. A trilha de histórico aplica a mesma regra.
 
 ## Endpoints
@@ -253,6 +311,20 @@ A documentação completa, com exemplos e erros, está em `/api/docs`.
 | `GET /api/agendas/cuidados-pessoais?visao=&data=&profissionalId=&janelaInicio=&janelaFim=` | `agenda.visualizar` | 071 |
 | `GET /api/idosos/{idosoId}/cuidados-pessoais` | `agenda.visualizar` | 071 |
 | `GET /api/agendamentos/{id}/lembretes` | `agenda.visualizar` ou ser o profissional | 074 |
+| `POST /api/agendamentos/{id}/registro-clinico` | `atendimento-clinico.criar` | 086, 087 |
+| `GET /api/agendamentos/{id}/registro-clinico` · `GET /api/registros-clinicos/{id}` | `atendimento-clinico.visualizar` (leitura auditada) | 086 |
+| `PUT /api/registros-clinicos/{id}` · `POST /api/registros-clinicos/{id}/finalizar` | `atendimento-clinico.editar` (autor ou administrar) | 086 |
+| `POST /api/registros-clinicos/{id}/adendos` | `atendimento-clinico.criar` | 086 |
+| `GET /api/idosos/{idosoId}/registros-clinicos` | `atendimento-clinico.visualizar` (leitura auditada) | 086, 072 |
+| `GET /api/odontologia/acompanhamentos` · `GET /api/odontologia/acompanhamentos/{id}` | `atendimento-clinico.visualizar` (leitura auditada) | 087 |
+| `POST /api/odontologia/acompanhamentos` | `atendimento-clinico.criar` | 087 |
+| `PUT /api/odontologia/acompanhamentos/{id}` | `atendimento-clinico.editar` | 087 |
+| `GET /api/tratamentos-externos` · `GET /api/tratamentos-externos/{id}` | `atendimento-clinico.visualizar` (leitura auditada) | 088 |
+| `POST /api/tratamentos-externos` | `atendimento-clinico.criar` | 088 |
+| `PUT /api/tratamentos-externos/{id}` | `atendimento-clinico.editar` | 088 |
+| `GET /api/odontologia/pendencias?ciclo=AAAA-S&referencia=` | `atendimento-clinico.visualizar` (leitura auditada) | 089 |
+| `GET /api/odontologia/configuracao-ciclo` | `atendimento-clinico.visualizar` | 089 |
+| `PUT /api/odontologia/configuracao-ciclo` | `atendimento-clinico.administrar` | 089 |
 | `GET /api/especialidades` · `GET /api/especialidades/{id}` | `equipe.visualizar`, `equipe.administrar`, `agenda.visualizar`, `agenda.criar` ou `atendimento-clinico.visualizar` | 082, 084 |
 | `POST /api/especialidades` · `PUT /api/especialidades/{id}` · `PATCH /api/especialidades/{id}/status` | `equipe.administrar` | 082, 084 |
 | `GET /api/colaboradores/{id}/disponibilidades` | `equipe.visualizar`, `agenda.criar` ou `agenda.editar` | 082, 092 |
@@ -307,6 +379,9 @@ Usa a auditoria da Fundação (`public.audit_log`, via `audit()` em `src/db/help
 | `agendamento.criar` · `reagendar` · `cancelar` · `realizado` · `nao_realizado` · `corrigir_realizacao` | Alterações em agendamentos; criar e reagendar também registram recusas por conflito |
 | `colaborador.disponibilidade` | Substituição da disponibilidade |
 | `especialidade.criar` · `editar` · `ativar` · `inativar` | Alterações no catálogo de especialidades |
+| `registro_clinico.criar` · `criar_finalizado` · `editar` · `finalizar` · `adendo` | Registro clínico |
+| `acompanhamento_odontologico.criar` · `editar` · `tratamento_externo.criar` · `editar` · `odontologia.configuracao_ciclo` | Atendimento odontológico e externo |
+| `registro_clinico.ler` · `acompanhamento_odontologico.ler` · `tratamento_externo.ler` · `odontologia_pendencias.ler` | **Leitura** de dados clínicos: usuário, data/hora, idosos (`payload.idosos`), registros e rota |
 | `escala.criar` · `editar` · `situacao` | Alterações em escalas |
 | `escala.cobertura` | Substituição da cobertura mínima (com a versão anterior) |
 | `presenca.registrar` · `saida` | Registro de presença e saída |
@@ -317,7 +392,8 @@ Usa a auditoria da Fundação (`public.audit_log`, via `audit()` em `src/db/help
 |---|---|---|---|
 | Idosos (G1, US-011) | `src/grupo3/portas/idosos.js` | Adaptador real sobre `public.patients` | `buscarIdoso(idosoId) → { id, ref, nome, ativo } \| null`; `buscarIdososPorRef(refs) → Map<ref, idoso>`. `ativo` é sempre `true`: `TODO(integracao-G1)` |
 | Prontuário — visibilidade (G1, US-031) | `src/grupo3/portas/prontuario.js` | Stub `TODO(integracao-G1)` | `podeVerIdoso(usuario, idoso) → boolean`, chamado no histórico do idoso |
-| Prontuário — linha do tempo (G1, US-023/US-030) | `src/grupo3/portas/prontuario.js` | Stub `TODO(integracao-G1)`; uso a partir da Fatia 4 | `publicarNoProntuario({ idosoRef, origem: "grupo3", tipo, referenciaId, ocorridoEm, profissional, resumo }) → { status }` |
+| Prontuário — evolução (G1, US-023) | `src/grupo3/portas/prontuario.js` | **Adaptador real**: a evolução já existe no repositório (`public.evolutions`) | `publicarNoProntuario({ idosoId, autorUsuarioId, area, tipo, realizadoEm, resumo, adendo, referenciaId }, db) → { status: "publicado", referencia }`. Cria uma evolução `finalizado` do tipo `reavaliacao`, com título "Consulta médica: …", "Consulta odontológica: …" ou "Adendo · …", na mesma transação do registro |
+| Prontuário — linha do tempo (G1, US-030) | `src/grupo3/portas/prontuario.js` | Não existe; `TODO(integracao-G1)` | Quando existir, publicar também nela |
 | Notificações (G4, US-117) | `src/grupo3/portas/notificacoes.js` | Adaptador real do canal interno sobre `public.notifications`; `TODO(integracao-G4)` para o serviço do Grupo 4 | `enviarNotificacao({ usuarioId, titulo, corpo, link }, db) → { status: "enviado" \| "entregue", canal, referencia }`. Exceção = falha (o job tenta de novo) |
 | Jobs (T-008) | `src/grupo3/jobs.js` | Agendador no processo, ligado por `JOBS_ENABLED=true` | `iniciarJobs({ intervaloSeg, jobs })` e `pararJobs()` (chamado no `SIGTERM`/`SIGINT` de `src/server.js`). Cada rodada tem try/catch com log sem dados sensíveis; se a anterior de um job ainda está rodando, a nova é pulada. `processarLembretes({ agora, limite, enviar })` também pode ser chamado direto |
 | Indicadores (G5) | — | Fatia 6 | `GET /api/indicadores/atendimentos \| tarefas \| equipe` |

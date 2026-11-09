@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  areaClinica,
+  periodoDoCiclo,
   recortarNoDia,
   segmentosDoTurno,
   turnoDentroDaDisponibilidade,
@@ -269,5 +271,33 @@ describe("grupo3 · turnos que atravessam a meia-noite", () => {
       { inicio: "05:00", fim: "07:00", necessario: 1, escalados: 0, faltam: 1 },
     ]);
     assert.deepEqual(calcularLacunas({ inicio: "19:00", fim: "24:00", minimo: 1 }, [{ inicio: 1140, fim: 1440 }]), []);
+  });
+});
+
+describe("grupo3 · ciclo odontológico (US-089)", () => {
+  const semestre = { modo: "semestre_civil", dias: 180 };
+
+  it("semestre civil pelo parâmetro AAAA-S ou pela data de referência", () => {
+    assert.deepEqual(periodoDoCiclo(semestre, { ciclo: "2026-1" }, "2026-11-09"),
+      { modo: "semestre_civil", rotulo: "2026-1", inicio: "2026-01-01", fim: "2026-06-30" });
+    assert.equal(periodoDoCiclo(semestre, {}, "2026-11-09").rotulo, "2026-2");
+    assert.equal(periodoDoCiclo(semestre, { referencia: "2026-06-30" }, "2026-11-09").rotulo, "2026-1");
+    assert.equal(periodoDoCiclo(semestre, { referencia: "2026-07-01" }, "2026-11-09").inicio, "2026-07-01");
+  });
+
+  it("ciclo inválido e parâmetro trocado de modo são recusados", () => {
+    assert.throws(() => periodoDoCiclo(semestre, { ciclo: "2026-3" }, "2026-11-09"), /AAAA-S/);
+    assert.throws(() => periodoDoCiclo({ modo: "dias_corridos", dias: 90 }, { ciclo: "2026-2" }, "2026-11-09"), /semestre_civil/);
+  });
+
+  it("dias corridos termina na referência, inclusive", () => {
+    assert.deepEqual(periodoDoCiclo({ modo: "dias_corridos", dias: 30 }, { referencia: "2026-03-01" }, "2026-11-09"),
+      { modo: "dias_corridos", rotulo: "30 dias até 2026-03-01", inicio: "2026-01-31", fim: "2026-03-01" });
+  });
+
+  it("área clínica pela categoria do tipo", () => {
+    assert.equal(areaClinica("consulta_medica"), "medica");
+    assert.equal(areaClinica("consulta_odontologica"), "odontologica");
+    assert.equal(areaClinica("avaliacao"), null);
   });
 });

@@ -1,5 +1,6 @@
 // Dados de demonstração do Grupo 3 (agenda única, tipos de atendimento e equipe mínima).
 import { gerarLembretes } from "../grupo3/lembretes.js";
+import { publicarNoProntuario } from "../grupo3/portas/prontuario.js";
 
 const TIPOS = [
   // [nome, categoria, duração, exige motivo cancelar, exige motivo reagendar, permite sobreposição]
@@ -91,20 +92,23 @@ export async function seedGrupo3(tx) {
     ["p07", "Fisioterapia em grupo", "fisio", emDias(1, 9), "agendado", null],
     ["p01", "Consulta médica", "medico", emDias(2, 10), "agendado", "Revisão de pressão arterial."],
     ["p03", "Consulta odontológica", "dentista", emDias(3, 14), "agendado", "Avaliação de prótese."],
+    ["p03", "Consulta odontológica", "dentista", emDias(-20, 14), "realizado", "Revisão semestral."],
     ["p04", "Corte de cabelo", "cabeleireiro", emDias(1, 10), "agendado", null],
     ["p06", "Unhas", "voluntaria", emDias(1, 14), "agendado", null],
     ["p08", "Atendimento da farmácia", "farmacia", emDias(0, 16), "agendado", null],
   ];
+  const criados = [];
   for (const [idoso, tipo, colaborador, inicio, status, observacoes] of agendamentos) {
     const idosoRef = await refDe(tx, "patients", idoso);
     const encerrado = status !== "agendado";
+    const local = tipo.startsWith("Consulta") ? (tipo.includes("odonto") ? "Consultório odontológico" : "Consultório 1") : null;
     const rows = await tx.$queryRaw`
       INSERT INTO grupo3.agendamento (
-        idoso_ref, tipo_id, profissional_id, inicio, duracao_min, observacoes, status,
+        idoso_ref, tipo_id, profissional_id, inicio, duracao_min, local, observacoes, status,
         responsavel_realizacao_id, concluido_em, registrado_por_ref, criado_por_ref
       ) VALUES (
         ${idosoRef}::uuid, ${tipos[tipo].id}::uuid, ${colaboradores[colaborador]}::uuid, ${inicio}, ${tipos[tipo].duracao},
-        ${observacoes}, ${status}::grupo3.status_agendamento,
+        ${local}, ${observacoes}, ${status}::grupo3.status_agendamento,
         ${encerrado ? colaboradores[colaborador] : null}::uuid, ${encerrado ? inicio : null},
         ${encerrado ? autor : null}::uuid, ${autor}::uuid
       ) RETURNING id
@@ -114,7 +118,40 @@ export async function seedGrupo3(tx) {
       VALUES (${rows[0].id}::uuid, 'criado', ${JSON.stringify({ status: "agendado" })}::jsonb, ${autor}::uuid)
     `;
     if (!encerrado) await gerarLembretes(tx, rows[0].id);
+    criados.push({ idoso, idosoRef, tipo, colaborador, inicio, status, id: rows[0].id });
   }
+
+  // Atendimento odontológico (Fatia 4): acompanhamento, registro finalizado publicado no prontuário e
+  // um tratamento externo.
+  const dentistaRef = await refDe(tx, "users", "s07");
+  const p03 = criados.find((a) => a.idoso === "p03" && a.status === "realizado");
+  const acompanhamento = await tx.$queryRaw`
+    INSERT INTO grupo3.acompanhamento_odontologico (idoso_ref, responsavel_id, plano, periodicidade_dias, situacao, criado_por_ref)
+    VALUES (${p03.idosoRef}::uuid, ${colaboradores.dentista}::uuid, 'Revisão de prótese e higiene oral a cada seis meses.', 180,
+            'em_acompanhamento', ${dentistaRef}::uuid)
+    RETURNING id
+  `;
+  const registro = await tx.$queryRaw`
+    INSERT INTO grupo3.registro_clinico (agendamento_id, acompanhamento_id, idoso_ref, area, profissional_id, tipo, realizado_em, resumo, autor_ref)
+    VALUES (${p03.id}::uuid, ${acompanhamento[0].id}::uuid, ${p03.idosoRef}::uuid, 'odontologica', ${colaboradores.dentista}::uuid,
+            'Consulta odontológica', ${p03.inicio}, 'Prótese bem adaptada, sem lesões em mucosa. Reforçada a higiene noturna.', ${dentistaRef}::uuid)
+    RETURNING id
+  `;
+  const publicacao = await publicarNoProntuario({
+    idosoId: "p03", autorUsuarioId: "s07", area: "odontologica", tipo: "Consulta odontológica", realizadoEm: p03.inicio,
+    resumo: "Prótese bem adaptada, sem lesões em mucosa. Reforçada a higiene noturna.", adendo: false, referenciaId: registro[0].id,
+  }, tx);
+  await tx.$executeRaw`
+    UPDATE grupo3.registro_clinico
+    SET status = 'finalizado', finalizado_em = ${p03.inicio}, finalizado_por_ref = ${dentistaRef}::uuid,
+        publicacao_status = ${publicacao.status}, prontuario_ref = ${publicacao.referencia}
+    WHERE id = ${registro[0].id}::uuid
+  `;
+  await tx.$executeRaw`
+    INSERT INTO grupo3.tratamento_externo (idoso_ref, area, tipo, local_externo, data, instituicao, observacoes, criado_por_ref)
+    VALUES (${await refDe(tx, "patients", "p05")}::uuid, 'odontologica', 'Extração dentária', 'Centro de Especialidades Odontológicas',
+            ${emDiaLocal(-30)}::date, 'CEO Municipal (fictício)', 'Sem intercorrências.', ${autor}::uuid)
+  `;
 
   // Disponibilidade declarada (dia ISO: 1 = segunda).
   const disponibilidades = [

@@ -77,6 +77,8 @@ describe("grupo3 · documentação", () => {
       "/api/agendas/farmacia", "/api/agendas/cuidados-pessoais", "/api/idosos/{idosoId}/cuidados-pessoais",
       "/api/agendamentos/{id}/lembretes", "/api/escalas", "/api/escalas/lacunas", "/api/escalas/cobertura-necessaria",
       "/api/presencas", "/api/colaboradores/{id}/disponibilidades", "/api/especialidades",
+      "/api/agendamentos/{id}/registro-clinico", "/api/registros-clinicos/{id}", "/api/odontologia/acompanhamentos",
+      "/api/tratamentos-externos", "/api/odontologia/pendencias",
     ]) {
       assert.ok(spec.paths[rota]?.get, rota);
     }
@@ -944,5 +946,312 @@ describe("grupo3 · presença (US-093) separada da escala", () => {
       WHERE table_schema = 'grupo3' AND table_name IN ('escala', 'presenca') ORDER BY table_name
     `;
     assert.deepEqual(tabelas.map((t) => t.table_name), ["escala", "presenca"]);
+  });
+});
+
+// ---------------- Fatia 4 ----------------
+
+Object.assign(EMAILS, { odonto: "luciana.prado@lardoirmaovelho.example" });
+
+async function leituraAuditada(acao, usuarioId, idosoId) {
+  const rows = await prisma.$queryRaw`
+    SELECT count(*)::int AS n FROM public.audit_log
+    WHERE action = ${acao} AND user_id = ${usuarioId} AND payload->'idosos' ? ${idosoId}
+  `;
+  return rows[0].n;
+}
+
+describe("grupo3 · consultas (US-085)", () => {
+  let paulo;
+  let consultaMedica;
+  let avaliacao;
+
+  before(async () => {
+    paulo = await colaboradorPorNome("Dr. Paulo Ferraz Neto");
+    consultaMedica = await tipoPorNome("Consulta médica");
+    avaliacao = await tipoPorNome("Avaliação multiprofissional");
+    const escala = await post("gestor", "/api/escalas", {
+      colaboradorId: paulo, local: "Consultório 1", data: "2030-07-01", horaInicio: "08:00", horaFim: "12:00",
+    });
+    assert.equal(escala.status, 201);
+  });
+
+  const consultar = (extra) => post("recepcao", "/api/agendamentos", {
+    idosoId: "p09", tipoId: consultaMedica, profissionalId: paulo, local: "Consultório 1", ...extra,
+  });
+
+  it("consulta exige local", async () => {
+    const resposta = await consultar({ local: undefined, inicio: "2030-07-01T09:00:00-03:00" });
+    assert.equal(resposta.status, 422);
+    assert.equal(resposta.body.error.details[0].path, "local");
+  });
+
+  it("dentro da escala não avisa; fora da escala é aceita com aviso", async () => {
+    const dentro = await consultar({ inicio: "2030-07-01T09:00:00-03:00" });
+    assert.equal(dentro.status, 201);
+    assert.deepEqual(dentro.body.avisos, []);
+    assert.equal(dentro.body.local, "Consultório 1");
+    const fora = await consultar({ inicio: "2030-07-01T14:00:00-03:00" });
+    assert.equal(fora.status, 201);
+    assert.equal(fora.body.avisos[0].codigo, "fora_da_escala");
+    const reagendada = await post("recepcao", `/api/agendamentos/${dentro.body.id}/reagendar`, {
+      inicio: "2030-07-02T09:00:00-03:00", motivo: "Pedido da família",
+    });
+    assert.equal(reagendada.status, 200);
+    assert.equal(reagendada.body.avisos[0].codigo, "fora_da_escala");
+    const verificacao = await post("recepcao", "/api/agendamentos/verificar-conflitos", {
+      profissionalId: paulo, tipoId: consultaMedica, inicio: "2030-07-01T10:30:00-03:00",
+    });
+    assert.deepEqual(verificacao.body.avisos, []);
+  });
+
+  it("outros tipos não recebem aviso de escala", async () => {
+    const resposta = await post("recepcao", "/api/agendamentos", {
+      idosoId: "p09", tipoId: avaliacao, profissionalId: paulo, inicio: "2030-07-03T15:00:00-03:00",
+    });
+    assert.equal(resposta.status, 201);
+    assert.deepEqual(resposta.body.avisos, []);
+  });
+});
+
+describe("grupo3 · registro clínico (US-086)", () => {
+  let paulo;
+  let consultaMedica;
+  let realizada;
+  let registroId;
+
+  before(async () => {
+    paulo = await colaboradorPorNome("Dr. Paulo Ferraz Neto");
+    consultaMedica = await tipoPorNome("Consulta médica");
+    realizada = (await post("recepcao", "/api/agendamentos", {
+      idosoId: "p09", tipoId: consultaMedica, profissionalId: paulo, local: "Consultório 1", inicio: "2025-04-07T09:00:00-03:00",
+    })).body.id;
+    assert.equal((await post("recepcao", `/api/agendamentos/${realizada}/realizacao`, { status: "realizado" })).status, 200);
+  });
+
+  it("cria rascunho com campos mínimos e conteúdo flexível validado", async () => {
+    const invalido = await post("medico", `/api/agendamentos/${realizada}/registro-clinico`, {
+      resumo: "Paciente estável, sem queixas.", conteudo: { exame: { pa: "13x8" } },
+    });
+    assert.equal(invalido.status, 422);
+    const criado = await post("medico", `/api/agendamentos/${realizada}/registro-clinico`, {
+      resumo: "Paciente estável, sem queixas.", conteudo: { pressaoArterial: "13x8", conduta: "Manter medicação", retornoDias: 90 },
+    });
+    assert.equal(criado.status, 201);
+    registroId = criado.body.id;
+    assert.equal(criado.body.status, "rascunho");
+    assert.equal(criado.body.area, "medica");
+    assert.equal(criado.body.tipo, "Consulta médica");
+    assert.equal(criado.body.profissional.nome, "Dr. Paulo Ferraz Neto");
+    assert.equal(criado.body.autor.id, "s05");
+    assert.equal(new Date(criado.body.realizadoEm).toISOString(), "2025-04-07T12:00:00.000Z");
+    assert.equal(criado.body.conteudo.retornoDias, 90);
+    assert.equal(criado.body.publicacao, null);
+    assert.equal((await post("medico", `/api/agendamentos/${realizada}/registro-clinico`, { resumo: "Segundo registro da consulta." })).status, 409);
+  });
+
+  it("só o autor edita o rascunho; consulta agendada não finaliza", async () => {
+    assert.equal((await put("odonto", `/api/registros-clinicos/${registroId}`, { resumo: "Tentativa de outra profissional." })).status, 403);
+    const editado = await put("medico", `/api/registros-clinicos/${registroId}`, {
+      resumo: "Paciente estável, sem queixas. PA controlada.", conteudo: { pressaoArterial: "12x8" },
+    });
+    assert.equal(editado.status, 200);
+    assert.equal(editado.body.conteudo.pressaoArterial, "12x8");
+    const futura = (await post("recepcao", "/api/agendamentos", {
+      idosoId: "p09", tipoId: consultaMedica, profissionalId: paulo, local: "Consultório 1", inicio: "2030-07-08T09:00:00-03:00",
+    })).body.id;
+    const rascunhoFuturo = await post("medico", `/api/agendamentos/${futura}/registro-clinico`, { resumo: "Pré-consulta: trazer exames." });
+    assert.equal(rascunhoFuturo.status, 201);
+    assert.equal((await post("medico", `/api/registros-clinicos/${rascunhoFuturo.body.id}/finalizar`, {})).status, 409);
+    assert.equal((await post("medico", `/api/agendamentos/${futura}/registro-clinico`, { resumo: "Tentativa de finalizar antes da consulta.", finalizar: true })).status, 409);
+  });
+
+  it("finalizado é publicado no prontuário e não aceita edição", async () => {
+    const finalizado = await post("medico", `/api/registros-clinicos/${registroId}/finalizar`, {});
+    assert.equal(finalizado.status, 200);
+    assert.equal(finalizado.body.status, "finalizado");
+    assert.equal(finalizado.body.finalizadoPor.id, "s05");
+    assert.equal(finalizado.body.publicacao.status, "publicado");
+    const evolucoes = await get("medico", "/api/prontuarios/p09/evolucoes");
+    const evolucao = evolucoes.body.data.find((e) => e.id === finalizado.body.publicacao.prontuarioRef);
+    assert.ok(evolucao);
+    assert.equal(evolucao.status, "finalizado");
+    assert.match(evolucao.title, /^Consulta médica/);
+    assert.equal((await put("medico", `/api/registros-clinicos/${registroId}`, { resumo: "Mudança depois de finalizar." })).status, 409);
+    await assert.rejects(prisma.$executeRaw`UPDATE grupo3.registro_clinico SET resumo = 'alterado direto' WHERE id = ${registroId}::uuid`);
+    await assert.rejects(prisma.$executeRaw`DELETE FROM grupo3.registro_clinico WHERE id = ${registroId}::uuid`);
+  });
+
+  it("correção por adendo: registro novo vinculado, com autor e data", async () => {
+    const adendo = await post("medico", `/api/registros-clinicos/${registroId}/adendos`, {
+      resumo: "Adendo: paciente relatou tontura leve ao levantar.", conteudo: { orientacao: "Levantar devagar" },
+    });
+    assert.equal(adendo.status, 201);
+    assert.equal(adendo.body.id, registroId);
+    assert.equal(adendo.body.resumo, "Paciente estável, sem queixas. PA controlada.");
+    assert.equal(adendo.body.adendos.length, 1);
+    const item = adendo.body.adendos[0];
+    assert.equal(item.adendoDe, registroId);
+    assert.equal(item.status, "finalizado");
+    assert.equal(item.autor.id, "s05");
+    assert.ok(Date.now() - new Date(item.realizadoEm).getTime() < 60_000);
+    assert.equal(item.publicacao.status, "publicado");
+    const evolucoes = await get("medico", "/api/prontuarios/p09/evolucoes");
+    assert.ok(evolucoes.body.data.some((e) => e.id === item.publicacao.prontuarioRef && /^Adendo/.test(e.title)));
+    const viaAdendo = await post("medico", `/api/registros-clinicos/${item.id}/adendos`, { resumo: "Segundo adendo, via o primeiro." });
+    assert.equal(viaAdendo.body.adendos.length, 2);
+  });
+
+  it("rascunho não recebe adendo; tipo que não é consulta não recebe registro", async () => {
+    const futura = (await post("recepcao", "/api/agendamentos", {
+      idosoId: "p09", tipoId: consultaMedica, profissionalId: paulo, local: "Consultório 1", inicio: "2030-07-15T09:00:00-03:00",
+    })).body.id;
+    const rascunho = await post("medico", `/api/agendamentos/${futura}/registro-clinico`, { resumo: "Rascunho para teste de adendo." });
+    assert.equal((await post("medico", `/api/registros-clinicos/${rascunho.body.id}/adendos`, { resumo: "Não deveria aceitar." })).status, 409);
+    const avaliacao = (await post("recepcao", "/api/agendamentos", {
+      idosoId: "p09", tipoId: await tipoPorNome("Avaliação multiprofissional"), profissionalId: paulo, inicio: "2030-07-16T09:00:00-03:00",
+    })).body.id;
+    assert.equal((await post("medico", `/api/agendamentos/${avaliacao}/registro-clinico`, { resumo: "Não é consulta, não aceita." })).status, 422);
+  });
+
+  it("leitura é auditada e restrita ao atendimento clínico", async () => {
+    const antes = await leituraAuditada("registro_clinico.ler", "s02", "p09");
+    const lido = await get("gestor", `/api/agendamentos/${realizada}/registro-clinico`);
+    assert.equal(lido.status, 200);
+    assert.equal(lido.body.adendos.length, 2);
+    assert.equal(await leituraAuditada("registro_clinico.ler", "s02", "p09"), antes + 1);
+    const lista = await get("gestor", "/api/idosos/p09/registros-clinicos?area=medica");
+    assert.ok(lista.body.data.some((r) => r.id === registroId));
+    assert.equal(await leituraAuditada("registro_clinico.ler", "s02", "p09"), antes + 2);
+    assert.equal((await get("recepcao", `/api/registros-clinicos/${registroId}`)).status, 403);
+    assert.equal((await get("fisio", `/api/registros-clinicos/${registroId}`)).status, 403);
+    assert.equal((await post("recepcao", `/api/registros-clinicos/${registroId}/adendos`, { resumo: "Sem permissão para isto." })).status, 403);
+  });
+});
+
+describe("grupo3 · acompanhamento odontológico (US-087)", () => {
+  let acompanhamentoId;
+
+  it("um acompanhamento ativo por idoso, com plano, periodicidade e situação", async () => {
+    const luciana = await colaboradorPorNome("Dra. Luciana Prado");
+    const criado = await post("odonto", "/api/odontologia/acompanhamentos", {
+      idosoId: "p12", responsavelId: luciana, plano: "Tratamento periodontal e revisão semestral.", situacao: "em_tratamento",
+      proximaAvaliacao: "2026-12-01",
+    });
+    assert.equal(criado.status, 201);
+    acompanhamentoId = criado.body.id;
+    assert.equal(criado.body.periodicidadeDias, 180);
+    assert.equal(criado.body.responsavel.nome, "Dra. Luciana Prado");
+    assert.equal((await post("odonto", "/api/odontologia/acompanhamentos", { idosoId: "p12", plano: "Outro plano ativo." })).status, 409);
+    const concluido = await put("odonto", `/api/odontologia/acompanhamentos/${acompanhamentoId}`, {
+      responsavelId: luciana, plano: "Tratamento periodontal concluído.", situacao: "concluido",
+    });
+    assert.equal(concluido.status, 200);
+    assert.equal(concluido.body.situacao, "concluido");
+    assert.equal((await post("odonto", "/api/odontologia/acompanhamentos", { idosoId: "p12", plano: "Nova fase de acompanhamento." })).status, 201);
+  });
+
+  it("registro odontológico liga ao acompanhamento do mesmo idoso; leitura auditada", async () => {
+    const luciana = await colaboradorPorNome("Dra. Luciana Prado");
+    const consulta = (await post("recepcao", "/api/agendamentos", {
+      idosoId: "p11", tipoId: await tipoPorNome("Consulta odontológica"), profissionalId: luciana, local: "Consultório odontológico",
+      inicio: "2025-05-06T14:00:00-03:00",
+    })).body.id;
+    await post("recepcao", `/api/agendamentos/${consulta}/realizacao`, { status: "realizado" });
+    const deOutro = await post("odonto", `/api/agendamentos/${consulta}/registro-clinico`, {
+      resumo: "Avaliação de rotina sem alterações.", acompanhamentoId,
+    });
+    assert.equal(deOutro.status, 422);
+    const antes = await leituraAuditada("acompanhamento_odontologico.ler", "s07", "p12");
+    const lista = await get("odonto", "/api/odontologia/acompanhamentos?idosoId=p12");
+    assert.equal(lista.body.data.length, 2);
+    assert.equal(await leituraAuditada("acompanhamento_odontologico.ler", "s07", "p12"), antes + 1);
+    assert.equal((await get("recepcao", "/api/odontologia/acompanhamentos")).status, 403);
+  });
+});
+
+describe("grupo3 · tratamento externo (US-088)", () => {
+  it("registra tratamento fora da instituição ligado ao idoso, com agendamento opcional", async () => {
+    const semAgendamento = await post("medico", "/api/tratamentos-externos", {
+      idosoId: "p12", area: "medica", tipo: "Cateterismo", localExterno: "Hospital Regional", data: "2025-06-10",
+      instituicao: "Hospital Regional (fictício)", profissionalNome: "Dr. Externo", observacoes: "Alta no mesmo dia.",
+    });
+    assert.equal(semAgendamento.status, 201);
+    assert.equal(semAgendamento.body.idoso.id, "p12");
+    assert.equal(semAgendamento.body.agendamentoId, null);
+    assert.equal(semAgendamento.body.registradoPor.id, "s05");
+    const deOutroIdoso = (await post("recepcao", "/api/agendamentos", {
+      idosoId: "p09", tipoId: await tipoPorNome("Avaliação multiprofissional"),
+      profissionalId: await colaboradorPorNome("Dr. Paulo Ferraz Neto"), inicio: "2030-08-01T09:00:00-03:00",
+    })).body.id;
+    assert.equal((await post("medico", "/api/tratamentos-externos", {
+      idosoId: "p12", agendamentoId: deOutroIdoso, area: "medica", tipo: "Exame", localExterno: "Clínica X", data: "2025-06-11",
+    })).status, 422);
+    assert.equal((await post("medico", "/api/tratamentos-externos", {
+      idosoId: "p12", area: "medica", tipo: "Exame", localExterno: "Clínica X", data: "2030-01-01",
+    })).status, 422);
+    assert.equal((await put("medico", `/api/tratamentos-externos/${semAgendamento.body.id}`, {
+      idosoId: "p13", area: "medica", tipo: "Cateterismo", localExterno: "Hospital Regional", data: "2025-06-10",
+    })).status, 422);
+  });
+
+  it("leitura auditada e restrita", async () => {
+    const antes = await leituraAuditada("tratamento_externo.ler", "s05", "p12");
+    const lista = await get("medico", "/api/tratamentos-externos?idosoId=p12&area=medica");
+    assert.equal(lista.status, 200);
+    assert.ok(lista.body.data.every((t) => t.idoso.id === "p12" && t.area === "medica"));
+    assert.equal(await leituraAuditada("tratamento_externo.ler", "s05", "p12"), antes + 1);
+    assert.equal((await get("recepcao", "/api/tratamentos-externos")).status, 403);
+  });
+});
+
+describe("grupo3 · pendências odontológicas do ciclo (US-089)", () => {
+  before(async () => {
+    const luciana = await colaboradorPorNome("Dra. Luciana Prado");
+    await post("medico", "/api/tratamentos-externos", {
+      idosoId: "p10", area: "odontologica", tipo: "Limpeza", localExterno: "CEO", data: "2025-08-10",
+    });
+    const consulta = (await post("recepcao", "/api/agendamentos", {
+      idosoId: "p14", tipoId: await tipoPorNome("Consulta odontológica"), profissionalId: luciana, local: "Consultório odontológico",
+      inicio: "2025-09-15T14:00:00-03:00",
+    })).body.id;
+    await post("recepcao", `/api/agendamentos/${consulta}/realizacao`, { status: "realizado" });
+    const registro = await post("odonto", `/api/agendamentos/${consulta}/registro-clinico`, { resumo: "Revisão semestral sem alterações.", finalizar: true });
+    assert.equal(registro.body.status, "finalizado");
+  });
+
+  it("semestre civil: aponta quem não tem registro no ciclo informado", async () => {
+    const segundo = await get("gestor", "/api/odontologia/pendencias?ciclo=2025-2&limit=100");
+    assert.equal(segundo.status, 200);
+    assert.deepEqual(segundo.body.ciclo, { modo: "semestre_civil", rotulo: "2025-2", inicio: "2025-07-01", fim: "2025-12-31" });
+    const pendentes = segundo.body.data.map((d) => d.idoso.id);
+    assert.ok(!pendentes.includes("p10"));
+    assert.ok(!pendentes.includes("p14"));
+    assert.ok(pendentes.includes("p12"));
+    assert.equal(segundo.body.resumo.comRegistroNoCiclo, 2);
+    assert.equal(segundo.body.resumo.pendentes, segundo.body.resumo.totalIdosos - 2);
+    const primeiro = await get("gestor", "/api/odontologia/pendencias?ciclo=2025-1&limit=100");
+    assert.ok(primeiro.body.data.some((d) => d.idoso.id === "p10"));
+    assert.equal((await get("gestor", "/api/odontologia/pendencias?ciclo=2025-3")).status, 422);
+    assert.ok(await leituraAuditada("odontologia_pendencias.ler", "s02", "p12") >= 1);
+  });
+
+  it("dias corridos: janela configurável terminando na referência", async () => {
+    assert.equal((await put("medico", "/api/odontologia/configuracao-ciclo", { modo: "dias_corridos", dias: 60 })).status, 403);
+    const config = await put("gestor", "/api/odontologia/configuracao-ciclo", { modo: "dias_corridos", dias: 60 });
+    assert.equal(config.status, 200);
+    try {
+      const janela = await get("gestor", "/api/odontologia/pendencias?referencia=2025-09-30&limit=100");
+      assert.equal(janela.body.ciclo.inicio, "2025-08-02");
+      assert.equal(janela.body.ciclo.fim, "2025-09-30");
+      const ids = janela.body.data.map((d) => d.idoso.id);
+      assert.ok(!ids.includes("p10") && !ids.includes("p14"));
+      const curta = await get("gestor", "/api/odontologia/pendencias?referencia=2025-10-20&limit=100");
+      assert.ok(curta.body.data.some((d) => d.idoso.id === "p10"));
+      assert.equal((await get("gestor", "/api/odontologia/pendencias?ciclo=2025-2")).status, 422);
+    } finally {
+      await put("gestor", "/api/odontologia/configuracao-ciclo", { modo: "semestre_civil", dias: 180 });
+    }
+    assert.equal((await get("gestor", "/api/odontologia/configuracao-ciclo")).body.modo, "semestre_civil");
   });
 });

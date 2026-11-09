@@ -26,7 +26,7 @@ import { cancelarLembretes, gerarLembretes, listarLembretes } from "../../grupo3
 import { buscarIdoso } from "../../grupo3/portas/idosos.js";
 import { podeVerIdoso } from "../../grupo3/portas/prontuario.js";
 import {
-  calcularFim, exigeMotivo, janelaValida, mascarar, mascararHistorico, motivoValido, podeAlterar, podeRegistrarRealizacao,
+  calcularFim, ehConsulta, exigeMotivo, janelaValida, mascarar, mascararHistorico, motivoValido, podeAlterar, podeRegistrarRealizacao,
 } from "../../grupo3/regras.js";
 import {
   categoria,
@@ -73,6 +73,17 @@ const agendaQuery = z.object({
 
 function erroCampo(path, message) {
   return new HttpError(422, "Dados inválidos", [{ path, message }]);
+}
+
+// US-085 — consulta fora da escala do profissional é aceita, com aviso.
+async function avisosDeEscala(db, categoria, profissionalId, inicio, fim) {
+  if (!ehConsulta(categoria)) return [];
+  const rows = await db.$queryRaw`
+    SELECT 1 FROM grupo3.escala
+    WHERE colaborador_id = ${profissionalId}::uuid AND situacao <> 'cancelada' AND inicio <= ${inicio} AND fim >= ${fim}
+    LIMIT 1
+  `;
+  return rows.length ? [] : [{ codigo: "fora_da_escala", mensagem: "O profissional não está na escala nesse horário." }];
 }
 
 async function carregarTipo(db, id) {
@@ -345,7 +356,8 @@ router.post(
       profissionalId: b.profissionalId, tipoId: tipo.id, permiteSobreposicao: tipo.permite_sobreposicao,
       inicio: b.inicio, fim, ignorarId: b.ignorarAgendamentoId ?? null,
     });
-    res.json({ temConflito: conflitos.length > 0, inicio: b.inicio, fim, conflitos });
+    const avisos = await avisosDeEscala(prisma, tipo.categoria, b.profissionalId, b.inicio, fim);
+    res.json({ temConflito: conflitos.length > 0, inicio: b.inicio, fim, conflitos, avisos });
   }),
 );
 
@@ -369,12 +381,14 @@ router.post(
     if (!idoso) throw erroCampo("idosoId", "Idoso não encontrado.");
     if (!idoso.ativo) throw erroCampo("idosoId", "Idoso inativo.");
     let id;
+    let avisos;
     try {
-      id = await prisma.$transaction(async (tx) => {
+      ({ id, avisos } = await prisma.$transaction(async (tx) => {
         const tipo = await carregarTipo(tx, b.tipoId);
         if (!tipo) throw erroCampo("tipoId", "Tipo de atendimento não encontrado.");
         if (!tipo.ativo) throw erroCampo("tipoId", "Tipo de atendimento inativo.");
         await exigirProfissionalAtivo(tx, b.profissionalId);
+        if (ehConsulta(tipo.categoria) && !b.local) throw erroCampo("local", "Consulta exige o local do atendimento.");
         const duracao = b.duracaoMin ?? tipo.duracao_padrao_min;
         const fim = calcularFim(b.inicio, duracao);
         await travarProfissional(tx, b.profissionalId);
@@ -399,13 +413,13 @@ router.post(
           userId: req.user.id, action: "agendamento.criar", entity: "grupo3.agendamento", entityId: novoId,
           payload: { resultado: "sucesso", tipoId: tipo.id, profissionalId: b.profissionalId, inicio: b.inicio },
         });
-        return novoId;
-      });
+        return { id: novoId, avisos: await avisosDeEscala(tx, tipo.categoria, b.profissionalId, b.inicio, fim) };
+      }));
     } catch (error) {
       await auditarRecusa(req, "agendamento.criar", null, error);
       throw error;
     }
-    res.status(201).json(await buscarAgendamento(id));
+    res.status(201).json({ ...(await buscarAgendamento(id)), avisos });
   }),
 );
 
@@ -421,8 +435,9 @@ router.post(
   })),
   asyncHandler(async (req, res) => {
     const b = req.body;
+    let avisos;
     try {
-      await prisma.$transaction(async (tx) => {
+      avisos = await prisma.$transaction(async (tx) => {
         const atual = await travarAgendamento(tx, req.params.id);
         if (!atual) notFound("Agendamento não encontrado.");
         if (!podeAlterar(atual.status)) throw new HttpError(409, `Agendamento ${atual.status.replace("_", " ")} não pode ser reagendado.`);
@@ -455,13 +470,14 @@ router.post(
           userId: req.user.id, action: "agendamento.reagendar", entity: "grupo3.agendamento", entityId: atual.id,
           payload: { resultado: "sucesso", anterior, novo },
         });
+        return avisosDeEscala(tx, atual.categoria, profissionalId, b.inicio, fim);
       });
     } catch (error) {
       await auditarRecusa(req, "agendamento.reagendar", req.params.id, error);
       throw error;
     }
     const colaborador = await colaboradorDoUsuario(req.user);
-    res.json(mascarar(await buscarAgendamento(req.params.id), req.user, colaborador?.id));
+    res.json({ ...mascarar(await buscarAgendamento(req.params.id), req.user, colaborador?.id), avisos });
   }),
 );
 
