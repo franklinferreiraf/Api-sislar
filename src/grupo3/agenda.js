@@ -18,7 +18,7 @@ const conflitoSql = Prisma.sql`
 `;
 
 const selectSql = Prisma.sql`
-  SELECT a.id, a.idoso_ref, a.inicio, a.fim, a.duracao_min, a.local, a.observacoes,
+  SELECT a.id, a.idoso_ref, a.inicio, a.fim, a.duracao_min, a.local, a.observacoes, a.plano_fisioterapia_id,
          a.status::text AS status, a.motivo_status, a.observacao_realizacao, a.concluido_em,
          a.criado_em, a.atualizado_em,
          t.id AS tipo_id, t.nome AS tipo_nome, t.categoria::text AS tipo_categoria,
@@ -55,6 +55,7 @@ function paraAgendamento(row, idosos) {
     criadoEm: row.criado_em,
     atualizadoEm: row.atualizado_em,
     emConflito: row.em_conflito === true,
+    planoFisioterapiaId: row.plano_fisioterapia_id ?? null,
   };
 }
 
@@ -103,7 +104,7 @@ export async function buscarAgendamento(id, db = prisma) {
 export async function travarAgendamento(tx, id) {
   const rows = await tx.$queryRaw`
     SELECT a.id, a.idoso_ref, a.tipo_id, a.profissional_id, a.inicio, a.fim, a.duracao_min,
-           a.status::text AS status, a.responsavel_realizacao_id, a.observacao_realizacao,
+           a.status::text AS status, a.responsavel_realizacao_id, a.observacao_realizacao, a.plano_fisioterapia_id,
            t.categoria::text AS categoria, t.permite_sobreposicao,
            t.exige_motivo_cancelamento, t.exige_motivo_reagendamento, t.tolerancia_realizacao_min
     FROM grupo3.agendamento a

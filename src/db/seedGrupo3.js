@@ -83,6 +83,27 @@ export async function seedGrupo3(tx) {
   }
 
   const autor = await refDe(tx, "users", "s01");
+
+  // Plano de fisioterapia de p02 (Fatia 5): as sessões de fisioterapia individuais de p02 ficam ligadas a ele.
+  const fisioRef = await refDe(tx, "users", "s06");
+  const plano = (await tx.$queryRaw`
+    INSERT INTO grupo3.plano_fisioterapia (idoso_ref, responsavel_id, objetivo, data_inicio, data_fim, frequencia_semanal, criado_por_ref)
+    VALUES (${await refDe(tx, "patients", "p02")}::uuid, ${colaboradores.fisio}::uuid,
+            'Melhorar a marcha e reduzir o risco de quedas.', ${emDiaLocal(-30)}::date, ${emDiaLocal(60)}::date, 2, ${fisioRef}::uuid)
+    RETURNING id
+  `)[0].id;
+  const atividades = {};
+  for (const [chave, descricao, duracao, intensidade] of [
+    ["marcha", "Treino de marcha com andador", 15, "Leve"],
+    ["equilibrio", "Exercícios de equilíbrio estático", 10, "Leve"],
+  ]) {
+    atividades[chave] = (await tx.$queryRaw`
+      INSERT INTO grupo3.atividade_fisioterapia (plano_id, descricao, frequencia_semanal, duracao_min, intensidade, configuracao)
+      VALUES (${plano}::uuid, ${descricao}, 2, ${duracao}, ${intensidade}, ${JSON.stringify({ apoio: "andador" })}::jsonb)
+      RETURNING id
+    `)[0].id;
+  }
+
   const agendamentos = [
     // [idoso, tipo, colaborador, quando, status, observações]
     ["p02", "Sessão de fisioterapia", "fisio", emDias(-2, 15), "realizado", "Treino de marcha com andador."],
@@ -101,13 +122,14 @@ export async function seedGrupo3(tx) {
     const idosoRef = await refDe(tx, "patients", idoso);
     const encerrado = status !== "agendado";
     const local = tipo.startsWith("Consulta") ? (tipo.includes("odonto") ? "Consultório odontológico" : "Consultório 1") : null;
+    const planoId = idoso === "p02" && tipo === "Sessão de fisioterapia" ? plano : null;
     const rows = await tx.$queryRaw`
       INSERT INTO grupo3.agendamento (
-        idoso_ref, tipo_id, profissional_id, inicio, duracao_min, local, observacoes, status,
+        idoso_ref, tipo_id, profissional_id, inicio, duracao_min, local, observacoes, plano_fisioterapia_id, status,
         responsavel_realizacao_id, concluido_em, registrado_por_ref, criado_por_ref
       ) VALUES (
         ${idosoRef}::uuid, ${tipos[tipo].id}::uuid, ${colaboradores[colaborador]}::uuid, ${inicio}, ${tipos[tipo].duracao},
-        ${local}, ${observacoes}, ${status}::grupo3.status_agendamento,
+        ${local}, ${observacoes}, ${planoId}::uuid, ${status}::grupo3.status_agendamento,
         ${encerrado ? colaboradores[colaborador] : null}::uuid, ${encerrado ? inicio : null},
         ${encerrado ? autor : null}::uuid, ${autor}::uuid
       ) RETURNING id
@@ -119,6 +141,22 @@ export async function seedGrupo3(tx) {
     if (!encerrado) await gerarLembretes(tx, rows[0].id);
     criados.push({ idoso, idosoRef, tipo, colaborador, inicio, status, id: rows[0].id });
   }
+
+  // Execução e evolução da sessão realizada de p02. A fisioterapeuta não tem evolucao.create: a evolução
+  // fica aguardando permissão para ir ao prontuário.
+  const sessaoFeita = criados.find((a) => a.idoso === "p02" && a.status === "realizado");
+  for (const [chave, statusExecucao] of [["marcha", "realizada"], ["equilibrio", "parcial"]]) {
+    await tx.$executeRaw`
+      INSERT INTO grupo3.execucao_atividade (agendamento_id, atividade_id, profissional_id, status, registrado_por_ref)
+      VALUES (${sessaoFeita.id}::uuid, ${atividades[chave]}::uuid, ${colaboradores.fisio}::uuid,
+              ${statusExecucao}::grupo3.status_execucao_atividade, ${fisioRef}::uuid)
+    `;
+  }
+  await tx.$executeRaw`
+    INSERT INTO grupo3.evolucao_fisioterapia (plano_id, agendamento_id, texto, registrado_em, autor_ref, publicacao_status)
+    VALUES (${plano}::uuid, ${sessaoFeita.id}::uuid, 'Caminhou 20 m com andador sem dor; equilíbrio ainda instável.',
+            ${sessaoFeita.inicio}, ${fisioRef}::uuid, 'aguardando_permissao')
+  `;
 
   // Atendimento odontológico (Fatia 4): acompanhamento, registro finalizado publicado no prontuário e
   // um tratamento externo.

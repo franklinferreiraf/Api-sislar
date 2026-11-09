@@ -363,6 +363,73 @@ router.post(
 
 // ---------- Escrita ----------
 
+// Sessão de fisioterapia ligada a plano (US-079): o plano precisa ser do mesmo idoso e estar ativo;
+// fora do período do plano a sessão é aceita com aviso.
+async function avisosDoPlano(db, { planoId, categoria, idosoRef, inicio }) {
+  if (!planoId) return [];
+  if (categoria !== "fisioterapia") throw erroCampo("planoFisioterapiaId", "Plano de fisioterapia só em sessão de fisioterapia.");
+  const rows = await db.$queryRaw`
+    SELECT idoso_ref, situacao::text AS situacao,
+           (${inicio}::timestamptz AT TIME ZONE grupo3.fuso_horario())::date AS dia,
+           data_inicio, data_fim
+    FROM grupo3.plano_fisioterapia WHERE id = ${planoId}::uuid
+  `;
+  const plano = rows[0];
+  if (!plano) throw erroCampo("planoFisioterapiaId", "Plano de fisioterapia não encontrado.");
+  if (plano.idoso_ref !== idosoRef) throw erroCampo("planoFisioterapiaId", "O plano é de outro idoso.");
+  if (plano.situacao !== "ativo") throw erroCampo("planoFisioterapiaId", "O plano não está ativo.");
+  const dentro = plano.dia >= plano.data_inicio && (!plano.data_fim || plano.dia <= plano.data_fim);
+  return dentro ? [] : [{ codigo: "fora_do_periodo_do_plano", mensagem: "A sessão está fora do período do plano de fisioterapia." }];
+}
+
+/**
+ * Cria um agendamento dentro de uma transação já aberta (usado por POST /agendamentos e pela programação
+ * semanal da fisioterapia). Valida tipo, profissional, local de consulta e conflito; gera lembretes,
+ * histórico e auditoria. Devolve { id, avisos }.
+ */
+export async function criarAgendamento(tx, usuario, idoso, b) {
+  const tipo = await carregarTipo(tx, b.tipoId);
+  if (!tipo) throw erroCampo("tipoId", "Tipo de atendimento não encontrado.");
+  if (!tipo.ativo) throw erroCampo("tipoId", "Tipo de atendimento inativo.");
+  await exigirProfissionalAtivo(tx, b.profissionalId);
+  if (ehConsulta(tipo.categoria) && !b.local) throw erroCampo("local", "Consulta exige o local do atendimento.");
+  const avisosPlano = await avisosDoPlano(tx, { planoId: b.planoFisioterapiaId, categoria: tipo.categoria, idosoRef: idoso.ref, inicio: b.inicio });
+  const duracao = b.duracaoMin ?? tipo.duracao_padrao_min;
+  const fim = calcularFim(b.inicio, duracao);
+  await travarProfissional(tx, b.profissionalId);
+  const conflitos = await buscarConflitos(tx, {
+    profissionalId: b.profissionalId, tipoId: tipo.id, permiteSobreposicao: tipo.permite_sobreposicao,
+    inicio: b.inicio, fim,
+  });
+  if (conflitos.length) throw erroConflito(conflitos);
+  const rows = await tx.$queryRaw`
+    INSERT INTO grupo3.agendamento (idoso_ref, tipo_id, profissional_id, inicio, duracao_min, local, observacoes, plano_fisioterapia_id, criado_por_ref)
+    VALUES (${idoso.ref}::uuid, ${tipo.id}::uuid, ${b.profissionalId}::uuid, ${b.inicio}, ${duracao},
+            ${b.local ?? null}, ${b.observacoes ?? null}, ${b.planoFisioterapiaId ?? null}::uuid, ${usuario.ref}::uuid)
+    RETURNING id
+  `;
+  const novoId = rows[0].id;
+  await gerarLembretes(tx, novoId);
+  await registrarHistorico(tx, {
+    agendamentoId: novoId, acao: "criado", autorRef: usuario.ref,
+    novo: { inicio: b.inicio, duracaoMin: duracao, profissionalId: b.profissionalId, tipoId: tipo.id, status: "agendado" },
+  });
+  await audit(tx, {
+    userId: usuario.id, action: "agendamento.criar", entity: "grupo3.agendamento", entityId: novoId,
+    payload: { resultado: "sucesso", tipoId: tipo.id, profissionalId: b.profissionalId, inicio: b.inicio, planoFisioterapiaId: b.planoFisioterapiaId ?? null },
+  });
+  return { id: novoId, avisos: [...(await avisosDeEscala(tx, tipo.categoria, b.profissionalId, b.inicio, fim)), ...avisosPlano] };
+}
+
+export async function exigirIdosoAtivo(idosoIdParam) {
+  const idoso = await buscarIdoso(idosoIdParam);
+  if (!idoso) throw erroCampo("idosoId", "Idoso não encontrado.");
+  if (!idoso.ativo) throw erroCampo("idosoId", "Idoso inativo.");
+  return idoso;
+}
+
+export { auditarRecusa };
+
 router.post(
   "/agendamentos",
   requirePerm("agenda.criar"),
@@ -374,52 +441,19 @@ router.post(
     duracaoMin: duracaoMin.optional(),
     local: texto(120).nullish(),
     observacoes: texto(2000).nullish(),
+    planoFisioterapiaId: uuid.nullish(),
   })),
   asyncHandler(async (req, res) => {
     const b = req.body;
-    const idoso = await buscarIdoso(b.idosoId);
-    if (!idoso) throw erroCampo("idosoId", "Idoso não encontrado.");
-    if (!idoso.ativo) throw erroCampo("idosoId", "Idoso inativo.");
-    let id;
-    let avisos;
+    const idoso = await exigirIdosoAtivo(b.idosoId);
+    let resultado;
     try {
-      ({ id, avisos } = await prisma.$transaction(async (tx) => {
-        const tipo = await carregarTipo(tx, b.tipoId);
-        if (!tipo) throw erroCampo("tipoId", "Tipo de atendimento não encontrado.");
-        if (!tipo.ativo) throw erroCampo("tipoId", "Tipo de atendimento inativo.");
-        await exigirProfissionalAtivo(tx, b.profissionalId);
-        if (ehConsulta(tipo.categoria) && !b.local) throw erroCampo("local", "Consulta exige o local do atendimento.");
-        const duracao = b.duracaoMin ?? tipo.duracao_padrao_min;
-        const fim = calcularFim(b.inicio, duracao);
-        await travarProfissional(tx, b.profissionalId);
-        const conflitos = await buscarConflitos(tx, {
-          profissionalId: b.profissionalId, tipoId: tipo.id, permiteSobreposicao: tipo.permite_sobreposicao,
-          inicio: b.inicio, fim,
-        });
-        if (conflitos.length) throw erroConflito(conflitos);
-        const rows = await tx.$queryRaw`
-          INSERT INTO grupo3.agendamento (idoso_ref, tipo_id, profissional_id, inicio, duracao_min, local, observacoes, criado_por_ref)
-          VALUES (${idoso.ref}::uuid, ${tipo.id}::uuid, ${b.profissionalId}::uuid, ${b.inicio}, ${duracao},
-                  ${b.local ?? null}, ${b.observacoes ?? null}, ${req.user.ref}::uuid)
-          RETURNING id
-        `;
-        const novoId = rows[0].id;
-        await gerarLembretes(tx, novoId);
-        await registrarHistorico(tx, {
-          agendamentoId: novoId, acao: "criado", autorRef: req.user.ref,
-          novo: { inicio: b.inicio, duracaoMin: duracao, profissionalId: b.profissionalId, tipoId: tipo.id, status: "agendado" },
-        });
-        await audit(tx, {
-          userId: req.user.id, action: "agendamento.criar", entity: "grupo3.agendamento", entityId: novoId,
-          payload: { resultado: "sucesso", tipoId: tipo.id, profissionalId: b.profissionalId, inicio: b.inicio },
-        });
-        return { id: novoId, avisos: await avisosDeEscala(tx, tipo.categoria, b.profissionalId, b.inicio, fim) };
-      }));
+      resultado = await prisma.$transaction((tx) => criarAgendamento(tx, req.user, idoso, b));
     } catch (error) {
       await auditarRecusa(req, "agendamento.criar", null, error);
       throw error;
     }
-    res.status(201).json({ ...(await buscarAgendamento(id)), avisos });
+    res.status(201).json({ ...(await buscarAgendamento(resultado.id)), avisos: resultado.avisos });
   }),
 );
 
@@ -470,7 +504,10 @@ router.post(
           userId: req.user.id, action: "agendamento.reagendar", entity: "grupo3.agendamento", entityId: atual.id,
           payload: { resultado: "sucesso", anterior, novo },
         });
-        return avisosDeEscala(tx, atual.categoria, profissionalId, b.inicio, fim);
+        const avisosPlano = await avisosDoPlano(tx, {
+          planoId: atual.plano_fisioterapia_id, categoria: atual.categoria, idosoRef: atual.idoso_ref, inicio: b.inicio,
+        });
+        return [...(await avisosDeEscala(tx, atual.categoria, profissionalId, b.inicio, fim)), ...avisosPlano];
       });
     } catch (error) {
       await auditarRecusa(req, "agendamento.reagendar", req.params.id, error);

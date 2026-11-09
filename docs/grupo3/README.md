@@ -8,7 +8,7 @@ Backend dos épicos E07 (agenda, cuidados e atendimentos), E08 (fisioterapia), E
 | 2 | US-070, US-071, US-074 (lembretes + job) | **Entregue** |
 | 3 | US-091, US-092, US-082, US-083, US-084, US-093 | **Entregue** |
 | 4 | US-085 a US-089 | **Entregue** |
-| 5 | US-075 a US-080 | A fazer |
+| 5 | US-075 a US-080 | **Entregue** |
 | 6 | US-094 a US-096 + indicadores para o Grupo 5 | A fazer |
 | 7 | US-081, US-090 (P2) | A fazer |
 
@@ -50,7 +50,7 @@ Também dá para gravar `DATABASE_URL` no `.env`; uma variável já definida no 
 | `src/grupo3/lembretes.js` | Geração, cancelamento e envio dos lembretes (US-074) |
 | `src/grupo3/jobs.js` | Agendador dos jobs (`JOBS_ENABLED=true`), chamado por `src/server.js` |
 | `src/grupo3/auditoria.js` | Auditoria de leitura de dados clínicos |
-| `src/routes/grupo3/` | Rotas, montadas em `/api` por `index.js` (`agendamentos`, `tipos-atendimento`, `colaboradores`, `especialidades`, `escalas`, `presencas`, `clinico`) |
+| `src/routes/grupo3/` | Rotas, montadas em `/api` por `index.js` (`agendamentos`, `tipos-atendimento`, `colaboradores`, `especialidades`, `escalas`, `presencas`, `clinico`, `fisioterapia`) |
 | `src/docs/openapi.grupo3.js` | OpenAPI do G3, juntado em `src/docs/openapi.js` |
 | `src/db/seedGrupo3.js` | Dados de demonstração |
 | `tests/grupo3.rules.test.js`, `tests/grupo3.api.test.js` | Testes unitários, de integração e de permissão |
@@ -82,6 +82,12 @@ erDiagram
     AGENDAMENTO |o--o{ TRATAMENTO_EXTERNO : "opcional"
     PATIENTS_public ||--o{ TRATAMENTO_EXTERNO : "idoso_ref"
     PATIENTS_public ||--o{ ACOMPANHAMENTO_ODONTOLOGICO : "idoso_ref"
+    PATIENTS_public ||--o{ PLANO_FISIOTERAPIA : "idoso_ref (vários ativos)"
+    PLANO_FISIOTERAPIA |o--o{ AGENDAMENTO : "sessões"
+    PLANO_FISIOTERAPIA ||--o{ ATIVIDADE_FISIOTERAPIA : "atividades"
+    AGENDAMENTO ||--o{ EXECUCAO_ATIVIDADE : "sessão"
+    ATIVIDADE_FISIOTERAPIA ||--o{ EXECUCAO_ATIVIDADE : "execuções"
+    PLANO_FISIOTERAPIA ||--o{ EVOLUCAO_FISIOTERAPIA : "linha cronológica"
     USERS_public ||--o| COLABORADOR : "usuario_ref (opcional)"
     PATIENTS_public ||--o{ AGENDAMENTO : "idoso_ref"
 
@@ -179,6 +185,44 @@ erDiagram
         text instituicao
         text observacoes
     }
+    PLANO_FISIOTERAPIA {
+        uuid id PK
+        uuid idoso_ref
+        uuid responsavel_id FK
+        text objetivo
+        date data_inicio
+        date data_fim
+        smallint frequencia_semanal
+        enum situacao "ativo | suspenso | concluido | cancelado"
+    }
+    ATIVIDADE_FISIOTERAPIA {
+        uuid id PK
+        uuid plano_id FK
+        text descricao
+        smallint frequencia_semanal
+        int duracao_min
+        text intensidade
+        jsonb configuracao "flexível"
+        bool ativa
+    }
+    EXECUCAO_ATIVIDADE {
+        uuid id PK
+        uuid agendamento_id FK "sessão; único com atividade"
+        uuid atividade_id FK
+        uuid profissional_id FK
+        enum status "realizada | parcial | nao_realizada"
+        timestamptz registrado_em
+    }
+    EVOLUCAO_FISIOTERAPIA {
+        uuid id PK
+        uuid plano_id FK
+        uuid agendamento_id FK "opcional"
+        text texto
+        timestamptz registrado_em
+        uuid autor_ref
+        text publicacao_status
+        text prontuario_ref
+    }
     TIPO_ATENDIMENTO {
         uuid id PK
         text nome UK "único sem diferenciar maiúsculas"
@@ -206,6 +250,7 @@ erDiagram
         uuid responsavel_realizacao_id FK
         text observacao_realizacao
         uuid registrado_por_ref "users.ref de quem registrou"
+        uuid plano_fisioterapia_id FK "sessão de fisioterapia"
         timestamptz concluido_em
         uuid criado_por_ref "users.ref"
     }
@@ -276,7 +321,9 @@ Integridade garantida no banco:
 
 **Ciclo odontológico (US-089).** `GET /api/odontologia/pendencias` lista os idosos sem registro odontológico no ciclo: registro clínico odontológico finalizado ou tratamento externo odontológico. O modo é configurável (`grupo3.configuracao`, chave `odontologia.ciclo`): `semestre_civil` (padrão; `?ciclo=AAAA-S`, jan–jun = 1, jul–dez = 2) ou `dias_corridos` (janela de N dias até `?referencia=`).
 
-**Auditoria de leitura.** Ler registro clínico, acompanhamento odontológico, tratamento externo e pendências grava `<entidade>.ler` no `audit_log`, com quem acessou (`user_id`), quando (`at`), quais idosos (`payload.idosos`), quais registros e a rota.
+**Fisioterapia (US-075 a US-080).** O **plano** tem objetivo, período, frequência semanal, observações, responsável e situação; um idoso pode ter **mais de um plano ativo**. As **atividades** têm descrição, frequência, duração, intensidade e `configuracao` flexível (jsonb validado), e são inativadas em vez de excluídas. A **sessão** é um agendamento de categoria `fisioterapia` com `planoFisioterapiaId` (FK opcional): o plano precisa ser do mesmo idoso e estar ativo, e sessão fora do período do plano é aceita com o aviso `fora_do_periodo_do_plano`. A **execução de atividade** fica sempre vinculada à sessão (`agendamento_id`), uma por atividade e sessão, imutável. A **evolução do plano** é uma linha cronológica imutável e segue a regra de publicação do registro clínico (publica só se o autor tem `evolucao.create`; senão `aguardando_permissao`, com `POST /api/fisioterapia/evolucoes/republicar-pendentes`). A **rotina semanal** mostra as sessões da semana e a carga por dia, contando só `agendado` e `realizado`; `programar-semana` cria as sessões de um plano de uma vez, com a mesma validação do agendamento e tudo ou nada. Os **indicadores** trazem planos ativos e vigentes, idosos em fisioterapia e sessões previstas, realizadas, não realizadas e canceladas.
+
+**Auditoria de leitura.** Ler registro clínico, acompanhamento odontológico, tratamento externo, pendências, plano, execuções e evoluções de fisioterapia grava `<entidade>.ler` no `audit_log`, com quem acessou (`user_id`), quando (`at`), quais idosos (`payload.idosos`), quais registros e a rota.
 
 **LGPD.** Nas categorias clínicas (consultas, avaliação e fisioterapia), `observacoes`, `motivoStatus` e `observacaoRealizacao` voltam `null`, com `conteudoRestrito: true`, para quem não tem `atendimento-clinico.visualizar` (consultas e avaliação) ou `fisioterapia.visualizar`. A exceção é o próprio profissional do agendamento. A trilha de histórico aplica a mesma regra.
 
@@ -326,6 +373,20 @@ A documentação completa, com exemplos e erros, está em `/api/docs`.
 | `GET /api/odontologia/pendencias?ciclo=AAAA-S&referencia=` | `atendimento-clinico.visualizar` (leitura auditada) | 089 |
 | `GET /api/odontologia/configuracao-ciclo` | `atendimento-clinico.visualizar` | 089 |
 | `PUT /api/odontologia/configuracao-ciclo` | `atendimento-clinico.administrar` | 089 |
+| `GET /api/fisioterapia/planos` · `GET /api/fisioterapia/planos/{id}` · `GET /api/idosos/{idosoId}/planos-fisioterapia` | `fisioterapia.visualizar` (leitura auditada) | 075 |
+| `POST /api/fisioterapia/planos` | `fisioterapia.criar` | 075 |
+| `PUT /api/fisioterapia/planos/{id}` | `fisioterapia.editar` | 075 |
+| `GET /api/fisioterapia/planos/{id}/atividades` | `fisioterapia.visualizar` | 076 |
+| `POST /api/fisioterapia/planos/{id}/atividades` | `fisioterapia.criar` | 076 |
+| `PUT /api/fisioterapia/atividades/{id}` | `fisioterapia.editar` | 076 |
+| `POST /api/fisioterapia/atividades/{id}/execucoes` | `fisioterapia.criar` | 077 |
+| `GET /api/fisioterapia/planos/{id}/execucoes` | `fisioterapia.visualizar` (leitura auditada) | 077 |
+| `GET /api/fisioterapia/planos/{id}/evolucoes` | `fisioterapia.visualizar` (leitura auditada) | 078 |
+| `POST /api/fisioterapia/planos/{id}/evolucoes` | `fisioterapia.criar` | 078 |
+| `POST /api/fisioterapia/evolucoes/republicar-pendentes` | `fisioterapia.administrar` | 078 |
+| `POST /api/fisioterapia/planos/{id}/programar-semana` | `fisioterapia.criar` e `agenda.criar` | 079 |
+| `GET /api/fisioterapia/rotina-semanal?semana&profissionalId` | `fisioterapia.visualizar` | 079 |
+| `GET /api/fisioterapia/indicadores?inicio&fim` | `fisioterapia.visualizar` | 080 |
 | `GET /api/especialidades` · `GET /api/especialidades/{id}` | `equipe.visualizar`, `equipe.administrar`, `agenda.visualizar`, `agenda.criar` ou `atendimento-clinico.visualizar` | 082, 084 |
 | `POST /api/especialidades` · `PUT /api/especialidades/{id}` · `PATCH /api/especialidades/{id}/status` | `equipe.administrar` | 082, 084 |
 | `GET /api/colaboradores/{id}/disponibilidades` | `equipe.visualizar`, `agenda.criar` ou `agenda.editar` | 082, 092 |
@@ -382,7 +443,8 @@ Usa a auditoria da Fundação (`public.audit_log`, via `audit()` em `src/db/help
 | `especialidade.criar` · `editar` · `ativar` · `inativar` | Alterações no catálogo de especialidades |
 | `registro_clinico.criar` · `criar_finalizado` · `editar` · `finalizar` · `adendo` · `republicar` | Registro clínico |
 | `acompanhamento_odontologico.criar` · `editar` · `tratamento_externo.criar` · `editar` · `odontologia.configuracao_ciclo` | Atendimento odontológico e externo |
-| `registro_clinico.ler` · `acompanhamento_odontologico.ler` · `tratamento_externo.ler` · `odontologia_pendencias.ler` | **Leitura** de dados clínicos: usuário, data/hora, idosos (`payload.idosos`), registros e rota |
+| `plano_fisioterapia.criar` · `editar` · `atividade_fisioterapia.criar` · `editar` · `execucao_atividade.registrar` · `evolucao_fisioterapia.registrar` · `republicar` | Fisioterapia |
+| `registro_clinico.ler` · `acompanhamento_odontologico.ler` · `tratamento_externo.ler` · `odontologia_pendencias.ler` · `plano_fisioterapia.ler` · `execucao_atividade.ler` · `evolucao_fisioterapia.ler` | **Leitura** de dados clínicos: usuário, data/hora, idosos (`payload.idosos`), registros e rota |
 | `escala.criar` · `editar` · `situacao` | Alterações em escalas |
 | `escala.cobertura` | Substituição da cobertura mínima (com a versão anterior) |
 | `presenca.registrar` · `saida` | Registro de presença e saída |

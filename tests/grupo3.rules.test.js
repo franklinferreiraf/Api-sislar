@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  cargaPorDia,
+  diasDaSemana,
+  taxa,
   areaClinica,
   periodoDoCiclo,
   recortarNoDia,
@@ -299,5 +302,32 @@ describe("grupo3 · ciclo odontológico (US-089)", () => {
     assert.equal(areaClinica("consulta_medica"), "medica");
     assert.equal(areaClinica("consulta_odontologica"), "odontologica");
     assert.equal(areaClinica("avaliacao"), null);
+  });
+});
+
+describe("grupo3 · rotina semanal da fisioterapia (US-079)", () => {
+  it("semana de segunda a domingo", () => {
+    assert.deepEqual(diasDaSemana("2030-09-04"), ["2030-09-02", "2030-09-03", "2030-09-04", "2030-09-05", "2030-09-06", "2030-09-07", "2030-09-08"]);
+    assert.equal(diasDaSemana("2030-09-08")[0], "2030-09-02");
+  });
+
+  it("carga por dia conta só agendado e realizado", () => {
+    const p = { id: "c1", nome: "Renata" };
+    const sessoes = [
+      { data: "2030-09-02", status: "agendado", duracaoMin: 40, profissional: p },
+      { data: "2030-09-02", status: "realizado", duracaoMin: 30, profissional: p },
+      { data: "2030-09-02", status: "cancelado", duracaoMin: 40, profissional: p },
+      { data: "2030-09-03", status: "nao_realizado", duracaoMin: 40, profissional: p },
+    ];
+    const carga = cargaPorDia(diasDaSemana("2030-09-02"), sessoes);
+    assert.equal(carga[0].sessoes, 2);
+    assert.equal(carga[0].minutos, 70);
+    assert.deepEqual(carga[0].porProfissional, [{ id: "c1", nome: "Renata", sessoes: 2, minutos: 70 }]);
+    assert.equal(carga[1].sessoes, 0);
+  });
+
+  it("taxa com uma casa decimal e sem divisão por zero", () => {
+    assert.equal(taxa(2, 3), 66.7);
+    assert.equal(taxa(0, 0), null);
   });
 });

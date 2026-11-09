@@ -319,3 +319,41 @@ export function periodoDoCiclo(config, { ciclo, referencia }, hoje) {
     fim: semestre === 1 ? `${ano}-06-30` : `${ano}-12-31`,
   };
 }
+
+// ---------- Fisioterapia (US-079, US-080) ----------
+
+// Segunda a domingo da semana que contém a data.
+export function diasDaSemana(data) {
+  const segunda = somarDias(data, 1 - diaSemanaIso(data));
+  return Array.from({ length: 7 }, (_, i) => somarDias(segunda, i));
+}
+
+export const STATUS_QUE_CONTAM_NA_CARGA = ["agendado", "realizado"];
+
+/**
+ * Carga por dia da semana: só sessões "agendado" ou "realizado".
+ * `sessoes` = [{ data: "AAAA-MM-DD" (local), status, duracaoMin, profissional: { id, nome } }].
+ */
+export function cargaPorDia(dias, sessoes) {
+  return dias.map((data) => {
+    const doDia = sessoes.filter((s) => s.data === data && STATUS_QUE_CONTAM_NA_CARGA.includes(s.status));
+    const porProfissional = new Map();
+    for (const s of doDia) {
+      const atual = porProfissional.get(s.profissional.id) ?? { ...s.profissional, sessoes: 0, minutos: 0 };
+      atual.sessoes += 1;
+      atual.minutos += s.duracaoMin;
+      porProfissional.set(s.profissional.id, atual);
+    }
+    return {
+      data,
+      diaSemana: diaSemanaIso(data),
+      sessoes: doDia.length,
+      minutos: doDia.reduce((soma, s) => soma + s.duracaoMin, 0),
+      porProfissional: [...porProfissional.values()],
+    };
+  });
+}
+
+export function taxa(parte, total) {
+  return total ? Math.round((parte / total) * 1000) / 10 : null;
+}

@@ -79,6 +79,7 @@ describe("grupo3 · documentação", () => {
       "/api/presencas", "/api/colaboradores/{id}/disponibilidades", "/api/especialidades",
       "/api/agendamentos/{id}/registro-clinico", "/api/registros-clinicos/{id}", "/api/odontologia/acompanhamentos",
       "/api/tratamentos-externos", "/api/odontologia/pendencias",
+      "/api/fisioterapia/planos", "/api/fisioterapia/rotina-semanal", "/api/fisioterapia/indicadores", "/api/fisioterapia/planos/{id}/evolucoes",
     ]) {
       assert.ok(spec.paths[rota]?.get, rota);
     }
@@ -1307,5 +1308,186 @@ describe("grupo3 · publicação no prontuário respeita evolucao.create", () =>
     } finally {
       await request(app).patch("/api/usuarios/s07").set(await como("admin")).send({ profiles: ["odontologia"] });
     }
+  });
+});
+
+// ---------------- Fatia 5 ----------------
+
+describe("grupo3 · fisioterapia (US-075 a US-080)", () => {
+  let renata;
+  let sessaoTipo;
+  let plano;
+  let planoPassado;
+  let atividade;
+
+  before(async () => {
+    renata = await colaboradorPorNome("Renata Gouveia");
+    sessaoTipo = await tipoPorNome("Sessão de fisioterapia");
+  });
+
+  const sessao = (perfil, extra) => post(perfil, "/api/agendamentos", {
+    idosoId: "p15", tipoId: sessaoTipo, profissionalId: renata, ...extra,
+  });
+
+  it("US-075: plano com objetivo, período, frequência, observações e responsável; mais de um ativo por idoso", async () => {
+    const criado = await post("fisio", "/api/fisioterapia/planos", {
+      idosoId: "p15", responsavelId: renata, objetivo: "Fortalecer membros inferiores.", dataInicio: "2030-06-01",
+      dataFim: "2030-06-30", frequenciaSemanal: 2, observacoes: "Evitar carga no joelho esquerdo.",
+    });
+    assert.equal(criado.status, 201);
+    plano = criado.body.id;
+    assert.equal(criado.body.situacao, "ativo");
+    assert.equal(criado.body.vigente, false);
+    assert.equal(criado.body.responsavel.nome, "Renata Gouveia");
+    const segundo = await post("fisio", "/api/fisioterapia/planos", {
+      idosoId: "p15", responsavelId: renata, objetivo: "Treino respiratório.", dataInicio: "2030-06-01", frequenciaSemanal: 1,
+    });
+    assert.equal(segundo.status, 201);
+    const lista = await get("fisio", "/api/idosos/p15/planos-fisioterapia?situacao=ativo");
+    assert.equal(lista.body.data.length, 2);
+    assert.ok(await leituraAuditada("plano_fisioterapia.ler", "s06", "p15") >= 1);
+    assert.equal((await post("fisio", "/api/fisioterapia/planos", {
+      idosoId: "p15", responsavelId: renata, objetivo: "Período invertido.", dataInicio: "2030-06-10", dataFim: "2030-06-01", frequenciaSemanal: 1,
+    })).status, 422);
+    assert.equal((await post("recepcao", "/api/fisioterapia/planos", {
+      idosoId: "p15", responsavelId: renata, objetivo: "Sem permissão.", dataInicio: "2030-06-01", frequenciaSemanal: 1,
+    })).status, 403);
+    assert.equal((await get("recepcao", `/api/fisioterapia/planos/${plano}`)).status, 403);
+    assert.equal((await get("medico", `/api/fisioterapia/planos/${plano}`)).status, 200);
+  });
+
+  it("US-076: atividades com campos fixos e configuração flexível validada", async () => {
+    const criada = await post("fisio", `/api/fisioterapia/planos/${plano}/atividades`, {
+      descricao: "Agachamento assistido", frequenciaSemanal: 2, duracaoMin: 10, intensidade: "Moderada",
+      configuracao: { series: 3, repeticoes: 10, apoio: "barra" },
+    });
+    assert.equal(criada.status, 201);
+    atividade = criada.body.id;
+    assert.equal(criada.body.configuracao.series, 3);
+    assert.equal((await post("fisio", `/api/fisioterapia/planos/${plano}/atividades`, {
+      descricao: "Configuração aninhada", configuracao: { carga: { kg: 2 } },
+    })).status, 422);
+    const inativa = await put("fisio", `/api/fisioterapia/atividades/${criada.body.id}`, {
+      descricao: "Agachamento assistido", configuracao: { series: 2 }, ativa: true,
+    });
+    assert.equal(inativa.status, 200);
+    assert.equal(inativa.body.configuracao.series, 2);
+    const detalhe = await get("fisio", `/api/fisioterapia/planos/${plano}`);
+    assert.equal(detalhe.body.atividades.length, 1);
+  });
+
+  it("sessão ligada ao plano; fora do período é aceita com aviso; plano de outro idoso ou inativo recusado", async () => {
+    const dentro = await sessao("recepcao", { inicio: "2030-06-10T09:00:00-03:00", planoFisioterapiaId: plano });
+    assert.equal(dentro.status, 201);
+    assert.equal(dentro.body.planoFisioterapiaId, plano);
+    assert.deepEqual(dentro.body.avisos, []);
+    const fora = await sessao("recepcao", { inicio: "2030-07-10T09:00:00-03:00", planoFisioterapiaId: plano });
+    assert.equal(fora.status, 201);
+    assert.equal(fora.body.avisos[0].codigo, "fora_do_periodo_do_plano");
+    const reagendada = await post("recepcao", `/api/agendamentos/${dentro.body.id}/reagendar`, { inicio: "2030-07-11T09:00:00-03:00" });
+    assert.equal(reagendada.body.avisos[0].codigo, "fora_do_periodo_do_plano");
+    assert.equal((await post("recepcao", "/api/agendamentos", {
+      idosoId: "p16", tipoId: sessaoTipo, profissionalId: renata, inicio: "2030-06-11T09:00:00-03:00", planoFisioterapiaId: plano,
+    })).status, 422);
+    assert.equal((await sessao("recepcao", {
+      tipoId: await tipoPorNome("Avaliação multiprofissional"), inicio: "2030-06-12T09:00:00-03:00", planoFisioterapiaId: plano,
+    })).status, 422);
+  });
+
+  it("US-077: execução vinculada à sessão, uma por atividade e sessão", async () => {
+    planoPassado = (await post("fisio", "/api/fisioterapia/planos", {
+      idosoId: "p16", responsavelId: renata, objetivo: "Ganho de amplitude de ombro.", dataInicio: "2025-01-01", frequenciaSemanal: 2,
+    })).body.id;
+    const ativ = (await post("fisio", `/api/fisioterapia/planos/${planoPassado}/atividades`, { descricao: "Mobilização de ombro" })).body.id;
+    const sessaoFeita = await post("recepcao", "/api/agendamentos", {
+      idosoId: "p16", tipoId: sessaoTipo, profissionalId: renata, inicio: "2025-03-03T09:00:00-03:00", planoFisioterapiaId: planoPassado,
+    });
+    assert.equal(sessaoFeita.status, 201);
+    const execucao = await post("fisio", `/api/fisioterapia/atividades/${ativ}/execucoes`, {
+      agendamentoId: sessaoFeita.body.id, status: "parcial", observacoes: "Dor ao final.",
+    });
+    assert.equal(execucao.status, 201);
+    assert.equal(execucao.body.profissional.nome, "Renata Gouveia");
+    assert.equal(execucao.body.sessao.agendamentoId, sessaoFeita.body.id);
+    assert.equal((await post("fisio", `/api/fisioterapia/atividades/${ativ}/execucoes`, { agendamentoId: sessaoFeita.body.id, status: "realizada" })).status, 409);
+    assert.equal((await post("fisio", `/api/fisioterapia/atividades/${atividade}/execucoes`, { agendamentoId: sessaoFeita.body.id, status: "realizada" })).status, 422);
+    const futura = await sessao("recepcao", { inicio: "2030-06-17T09:00:00-03:00", planoFisioterapiaId: plano });
+    assert.equal((await post("fisio", `/api/fisioterapia/atividades/${atividade}/execucoes`, { agendamentoId: futura.body.id, status: "realizada" })).status, 422);
+    const cancelada = await post("recepcao", "/api/agendamentos", {
+      idosoId: "p16", tipoId: sessaoTipo, profissionalId: renata, inicio: "2025-03-05T09:00:00-03:00", planoFisioterapiaId: planoPassado,
+    });
+    await post("recepcao", `/api/agendamentos/${cancelada.body.id}/cancelar`, { motivo: "Idoso com febre" });
+    assert.equal((await post("fisio", `/api/fisioterapia/atividades/${ativ}/execucoes`, { agendamentoId: cancelada.body.id, status: "realizada" })).status, 409);
+    const lista = await get("fisio", `/api/fisioterapia/planos/${planoPassado}/execucoes`);
+    assert.equal(lista.body.data.length, 1);
+    assert.equal(lista.body.data[0].status, "parcial");
+  });
+
+  it("US-078: evolução cronológica, imutável, publicada só com evolucao.create", async () => {
+    const semPermissao = await post("fisio", `/api/fisioterapia/planos/${planoPassado}/evolucoes`, { texto: "Amplitude de flexão melhorou para 110 graus." });
+    assert.equal(semPermissao.status, 201);
+    assert.deepEqual(semPermissao.body.publicacao, { status: "aguardando_permissao", prontuarioRef: null });
+    const comPermissao = await post("admin", `/api/fisioterapia/planos/${planoPassado}/evolucoes`, { texto: "Revisão do plano pela coordenação." });
+    assert.equal(comPermissao.body.publicacao.status, "publicado");
+    const evolucoes = (await get("medico", "/api/prontuarios/p16/evolucoes")).body.data;
+    assert.ok(evolucoes.some((e) => e.id === comPermissao.body.publicacao.prontuarioRef && /^Evolução de fisioterapia/.test(e.title)));
+    const linha = await get("fisio", `/api/fisioterapia/planos/${planoPassado}/evolucoes`);
+    assert.deepEqual(linha.body.data.map((e) => e.id), [semPermissao.body.id, comPermissao.body.id]);
+    await assert.rejects(prisma.$executeRaw`UPDATE grupo3.evolucao_fisioterapia SET texto = 'alterado' WHERE id = ${semPermissao.body.id}::uuid`);
+
+    assert.equal((await post("fisio", "/api/fisioterapia/evolucoes/republicar-pendentes", {})).status, 403);
+    await request(app).patch("/api/usuarios/s06").set(await como("admin")).send({ profiles: ["fisioterapia", "enfermagem"] });
+    try {
+      const republicado = await post("gestor", "/api/fisioterapia/evolucoes/republicar-pendentes", {});
+      assert.ok(republicado.body.publicados >= 1);
+      const depois = await get("fisio", `/api/fisioterapia/planos/${planoPassado}/evolucoes`);
+      assert.equal(depois.body.data[0].publicacao.status, "publicado");
+    } finally {
+      await request(app).patch("/api/usuarios/s06").set(await como("admin")).send({ profiles: ["fisioterapia"] });
+    }
+  });
+
+  it("US-079: programação semanal (tudo ou nada) e carga por dia só com agendado e realizado", async () => {
+    const planoSemana = (await post("fisio", "/api/fisioterapia/planos", {
+      idosoId: "p17", responsavelId: renata, objetivo: "Condicionamento geral.", dataInicio: "2030-09-01", dataFim: "2030-09-30", frequenciaSemanal: 2,
+    })).body.id;
+    const corpo = { semana: "2030-09-04", tipoId: sessaoTipo, sessoes: [{ diaSemana: 1, hora: "09:00" }, { diaSemana: 3, hora: "09:00" }] };
+    const programada = await post("fisio", `/api/fisioterapia/planos/${planoSemana}/programar-semana`, corpo);
+    assert.equal(programada.status, 201);
+    assert.equal(programada.body.sessoes.length, 2);
+    assert.ok(programada.body.sessoes.every((s) => s.planoFisioterapiaId === planoSemana && s.profissional.id === renata));
+    assert.equal(new Date(programada.body.sessoes[0].inicio).toISOString(), "2030-09-02T12:00:00.000Z");
+    const repetida = await post("fisio", `/api/fisioterapia/planos/${planoSemana}/programar-semana`, {
+      ...corpo, sessoes: [{ diaSemana: 5, hora: "10:00" }, { diaSemana: 1, hora: "09:00" }],
+    });
+    assert.equal(repetida.status, 409);
+    assert.equal(repetida.body.error.details.sessao, 1);
+    assert.match(repetida.body.error.message, /^Sessão 2:/);
+
+    let rotina = await get("fisio", `/api/fisioterapia/rotina-semanal?semana=2030-09-04&profissionalId=${renata}`);
+    assert.equal(rotina.status, 200);
+    assert.deepEqual(rotina.body.semana.inicio, "2030-09-02");
+    assert.deepEqual(rotina.body.cargaPorDia.map((d) => d.sessoes), [1, 0, 1, 0, 0, 0, 0]);
+    assert.equal(rotina.body.cargaPorDia[0].minutos, 40);
+    await post("recepcao", `/api/agendamentos/${programada.body.sessoes[1].id}/cancelar`, { motivo: "Feriado" });
+    rotina = await get("fisio", `/api/fisioterapia/rotina-semanal?semana=2030-09-04&profissionalId=${renata}`);
+    assert.deepEqual(rotina.body.cargaPorDia.map((d) => d.sessoes), [1, 0, 0, 0, 0, 0, 0]);
+    assert.equal(rotina.body.resumo.canceladas, 1);
+    assert.equal(rotina.body.sessoes.length, 2);
+    assert.equal((await get("recepcao", "/api/fisioterapia/rotina-semanal")).status, 403);
+  });
+
+  it("US-080: indicadores de planos ativos e sessões previstas x realizadas", async () => {
+    const setembro = await get("gestor", "/api/fisioterapia/indicadores?inicio=2030-09-01&fim=2030-09-30");
+    assert.equal(setembro.status, 200);
+    assert.ok(setembro.body.planos.ativos >= 1);
+    assert.ok(setembro.body.planos.idososEmFisioterapia >= 1);
+    assert.equal(setembro.body.sessoes.previstas, 1);
+    assert.equal(setembro.body.sessoes.canceladas, 1);
+    const marco = await get("gestor", "/api/fisioterapia/indicadores?inicio=2025-03-01&fim=2025-03-31");
+    assert.equal(marco.body.sessoes.previstas, 1);
+    assert.equal(marco.body.sessoes.realizadas, 0);
+    assert.equal(marco.body.sessoes.taxaRealizacao, null);
+    assert.equal((await get("recepcao", "/api/fisioterapia/indicadores")).status, 403);
   });
 });

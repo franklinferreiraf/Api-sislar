@@ -6,6 +6,7 @@ import clinicoRouter from "./clinico.js";
 import colaboradoresRouter from "./colaboradores.js";
 import escalasRouter from "./escalas.js";
 import especialidadesRouter from "./especialidades.js";
+import fisioterapiaRouter from "./fisioterapia.js";
 import presencasRouter from "./presencas.js";
 import tiposAtendimentoRouter from "./tipos-atendimento.js";
 
@@ -20,5 +21,6 @@ router.use(especialidadesRouter);
 router.use(escalasRouter);
 router.use(presencasRouter);
 router.use(clinicoRouter);
+router.use(fisioterapiaRouter);
 
 export default router;

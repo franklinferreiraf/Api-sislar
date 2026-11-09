@@ -19,6 +19,8 @@ CREATE TYPE area_clinica AS ENUM ('medica','odontologica');
 CREATE TYPE status_registro_clinico AS ENUM ('rascunho','finalizado');
 CREATE TYPE situacao_acompanhamento AS ENUM ('em_tratamento','em_acompanhamento','concluido','suspenso');
 CREATE TYPE area_tratamento_externo AS ENUM ('medica','odontologica','outra');
+CREATE TYPE situacao_plano_fisioterapia AS ENUM ('ativo','suspenso','concluido','cancelado');
+CREATE TYPE status_execucao_atividade AS ENUM ('realizada','parcial','nao_realizada');
 CREATE TYPE status_lembrete AS ENUM ('pendente','enviado','entregue','falha','sem_destinatario','cancelado');
 
 -- Regras configuráveis do grupo (chave/valor). Ver docs/grupo3/decisoes-pendentes.md.
@@ -195,10 +197,12 @@ BEGIN
        OR OLD.status NOT IN ('realizado','nao_realizado')
        OR NEW.status NOT IN ('realizado','nao_realizado')
        OR (NEW.idoso_ref, NEW.tipo_id, NEW.profissional_id, NEW.inicio, NEW.duracao_min, NEW.local, NEW.observacoes,
-           NEW.motivo_status, NEW.concluido_em, NEW.registrado_por_ref, NEW.criado_por_ref, NEW.criado_em)
+           NEW.motivo_status, NEW.concluido_em, NEW.registrado_por_ref, NEW.criado_por_ref, NEW.criado_em,
+           NEW.plano_fisioterapia_id)
           IS DISTINCT FROM
           (OLD.idoso_ref, OLD.tipo_id, OLD.profissional_id, OLD.inicio, OLD.duracao_min, OLD.local, OLD.observacoes,
-           OLD.motivo_status, OLD.concluido_em, OLD.registrado_por_ref, OLD.criado_por_ref, OLD.criado_em) THEN
+           OLD.motivo_status, OLD.concluido_em, OLD.registrado_por_ref, OLD.criado_por_ref, OLD.criado_em,
+           OLD.plano_fisioterapia_id) THEN
       RAISE EXCEPTION 'Agendamento encerrado não pode ser alterado.';
     END IF;
   END IF;
@@ -427,5 +431,92 @@ CREATE TRIGGER marcar_atualizacao_tratamento_externo BEFORE UPDATE ON tratamento
   FOR EACH ROW EXECUTE FUNCTION marcar_atualizacao();
 CREATE TRIGGER impedir_exclusao_tratamento_externo BEFORE DELETE ON tratamento_externo
   FOR EACH ROW EXECUTE FUNCTION impedir_exclusao();
+
+-- Plano de tratamento de fisioterapia (US-075). Mais de um plano ativo por idoso é permitido.
+CREATE TABLE plano_fisioterapia (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  idoso_ref uuid NOT NULL,
+  responsavel_id uuid NOT NULL REFERENCES colaborador(id),
+  objetivo text NOT NULL CHECK (char_length(btrim(objetivo)) BETWEEN 5 AND 2000),
+  data_inicio date NOT NULL,
+  data_fim date,
+  frequencia_semanal smallint NOT NULL CHECK (frequencia_semanal BETWEEN 1 AND 14),
+  observacoes text CHECK (observacoes IS NULL OR char_length(observacoes) <= 4000),
+  situacao situacao_plano_fisioterapia NOT NULL DEFAULT 'ativo',
+  criado_por_ref uuid NOT NULL,
+  criado_em timestamptz NOT NULL DEFAULT now(),
+  atualizado_em timestamptz NOT NULL DEFAULT now(),
+  CHECK (data_fim IS NULL OR data_fim >= data_inicio)
+);
+CREATE INDEX indice_plano_fisioterapia_idoso ON plano_fisioterapia (idoso_ref, situacao);
+CREATE TRIGGER marcar_atualizacao_plano_fisioterapia BEFORE UPDATE ON plano_fisioterapia
+  FOR EACH ROW EXECUTE FUNCTION marcar_atualizacao();
+CREATE TRIGGER impedir_exclusao_plano_fisioterapia BEFORE DELETE ON plano_fisioterapia
+  FOR EACH ROW EXECUTE FUNCTION impedir_exclusao();
+
+-- Sessão de fisioterapia = agendamento de categoria fisioterapia, opcionalmente ligado a um plano.
+ALTER TABLE agendamento ADD COLUMN plano_fisioterapia_id uuid REFERENCES plano_fisioterapia(id);
+CREATE INDEX indice_agendamento_plano ON agendamento (plano_fisioterapia_id) WHERE plano_fisioterapia_id IS NOT NULL;
+
+-- Atividades do plano (US-076). Campos fixos + configuração flexível (modelo ainda não validado).
+CREATE TABLE atividade_fisioterapia (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  plano_id uuid NOT NULL REFERENCES plano_fisioterapia(id),
+  descricao text NOT NULL CHECK (char_length(btrim(descricao)) BETWEEN 3 AND 500),
+  frequencia_semanal smallint CHECK (frequencia_semanal IS NULL OR frequencia_semanal BETWEEN 1 AND 14),
+  duracao_min integer CHECK (duracao_min IS NULL OR duracao_min BETWEEN 1 AND 240),
+  intensidade text CHECK (intensidade IS NULL OR char_length(intensidade) <= 120),
+  configuracao jsonb NOT NULL DEFAULT '{}' CHECK (jsonb_typeof(configuracao) = 'object' AND octet_length(configuracao::text) <= 20000),
+  observacoes text CHECK (observacoes IS NULL OR char_length(observacoes) <= 2000),
+  ativa boolean NOT NULL DEFAULT true,
+  criado_em timestamptz NOT NULL DEFAULT now(),
+  atualizado_em timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX indice_atividade_plano ON atividade_fisioterapia (plano_id);
+CREATE TRIGGER marcar_atualizacao_atividade BEFORE UPDATE ON atividade_fisioterapia
+  FOR EACH ROW EXECUTE FUNCTION marcar_atualizacao();
+CREATE TRIGGER impedir_exclusao_atividade BEFORE DELETE ON atividade_fisioterapia
+  FOR EACH ROW EXECUTE FUNCTION impedir_exclusao();
+
+-- Realização de atividade (US-077), sempre dentro de uma sessão: uma por atividade e sessão.
+CREATE TABLE execucao_atividade (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  agendamento_id uuid NOT NULL REFERENCES agendamento(id),
+  atividade_id uuid NOT NULL REFERENCES atividade_fisioterapia(id),
+  profissional_id uuid NOT NULL REFERENCES colaborador(id),
+  status status_execucao_atividade NOT NULL,
+  observacoes text CHECK (observacoes IS NULL OR char_length(observacoes) <= 2000),
+  registrado_por_ref uuid NOT NULL,
+  registrado_em timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (agendamento_id, atividade_id)
+);
+CREATE INDEX indice_execucao_atividade ON execucao_atividade (atividade_id, registrado_em);
+CREATE TRIGGER preservar_execucao_atividade BEFORE UPDATE OR DELETE ON execucao_atividade
+  FOR EACH ROW EXECUTE FUNCTION impedir_alteracao_historico();
+
+-- Evolução do plano (US-078): linha cronológica imutável. Publicada no prontuário se o autor tem
+-- evolucao.create; senão aguardando_permissao (mesma regra do registro clínico).
+CREATE TABLE evolucao_fisioterapia (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  plano_id uuid NOT NULL REFERENCES plano_fisioterapia(id),
+  agendamento_id uuid REFERENCES agendamento(id),
+  texto text NOT NULL CHECK (char_length(btrim(texto)) BETWEEN 10 AND 8000),
+  registrado_em timestamptz NOT NULL DEFAULT now(),
+  autor_ref uuid NOT NULL,
+  publicacao_status text NOT NULL CHECK (publicacao_status IN ('publicado','aguardando_permissao','pendente_integracao','falha')),
+  prontuario_ref text
+);
+CREATE INDEX indice_evolucao_fisioterapia ON evolucao_fisioterapia (plano_id, registrado_em);
+
+CREATE FUNCTION proteger_evolucao_fisioterapia() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'DELETE' OR (NEW.plano_id, NEW.agendamento_id, NEW.texto, NEW.registrado_em, NEW.autor_ref)
+     IS DISTINCT FROM (OLD.plano_id, OLD.agendamento_id, OLD.texto, OLD.registrado_em, OLD.autor_ref) THEN
+    RAISE EXCEPTION 'Evolução de fisioterapia não pode ser alterada nem excluída.';
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER proteger_evolucao_fisioterapia_antes BEFORE UPDATE OR DELETE ON evolucao_fisioterapia
+  FOR EACH ROW EXECUTE FUNCTION proteger_evolucao_fisioterapia();
 
 COMMIT;

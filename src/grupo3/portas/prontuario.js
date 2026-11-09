@@ -12,7 +12,7 @@ export async function podeVerIdoso(_usuario, _idoso) {
   return true;
 }
 
-const ROTULO_AREA = { medica: "Consulta médica", odontologica: "Consulta odontológica" };
+const ROTULO_AREA = { medica: "Consulta médica", odontologica: "Consulta odontológica", fisioterapia: "Evolução de fisioterapia" };
 
 // Permissão do Grupo 1 para gravar evolução. A porta não a contorna: quem não tem fica "aguardando_permissao".
 export const PERMISSAO_PUBLICAR = "evolucao.create";

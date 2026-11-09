@@ -113,6 +113,7 @@ const exemploAgendamento = {
   criadoEm: "2026-11-09T12:00:00.000Z",
   atualizadoEm: "2026-11-09T12:00:00.000Z",
   emConflito: false,
+  planoFisioterapiaId: null,
 };
 
 const exemploConflito = erro("O profissional já tem agendamento nesse horário.", {
@@ -372,6 +373,59 @@ const corpoTratamento = {
   },
 };
 
+const exemploPlano = {
+  id: "5e6f7a8b-9c0d-4e1f-a2b3-c4d5e6f7a8b9",
+  idoso: { id: "p02", nome: "Antônio Pereira" },
+  responsavel: { id: exemploColaborador.id, nome: "Renata Gouveia" },
+  objetivo: "Melhorar a marcha e reduzir o risco de quedas.",
+  dataInicio: "2026-10-10",
+  dataFim: "2027-01-08",
+  frequenciaSemanal: 2,
+  observacoes: null,
+  situacao: "ativo",
+  vigente: true,
+  criadoEm: "2026-10-10T12:00:00.000Z",
+  atualizadoEm: "2026-10-10T12:00:00.000Z",
+};
+const exemploAtividade = {
+  id: "6f7a8b9c-0d1e-4f2a-b3c4-d5e6f7a8b9c0",
+  descricao: "Treino de marcha com andador",
+  frequenciaSemanal: 2,
+  duracaoMin: 15,
+  intensidade: "Leve",
+  configuracao: { apoio: "andador", series: 3 },
+  observacoes: null,
+  ativa: true,
+  criadoEm: "2026-10-10T12:00:00.000Z",
+  atualizadoEm: "2026-10-10T12:00:00.000Z",
+};
+const corpoPlano = {
+  type: "object",
+  required: ["responsavelId", "objetivo", "dataInicio", "frequenciaSemanal"],
+  properties: {
+    responsavelId: uuid,
+    objetivo: { type: "string", minLength: 5, maxLength: 2000 },
+    dataInicio: dataDia,
+    dataFim: { ...dataDia, nullable: true },
+    frequenciaSemanal: { type: "integer", minimum: 1, maximum: 14, description: "Sessões por semana." },
+    observacoes: { type: "string", maxLength: 4000, nullable: true },
+    situacao: { type: "string", enum: ["ativo", "suspenso", "concluido", "cancelado"], default: "ativo" },
+  },
+};
+const corpoAtividade = {
+  type: "object",
+  required: ["descricao"],
+  properties: {
+    descricao: { type: "string", minLength: 3, maxLength: 500 },
+    frequenciaSemanal: { type: "integer", minimum: 1, maximum: 14, nullable: true },
+    duracaoMin: { type: "integer", minimum: 1, maximum: 240, nullable: true },
+    intensidade: { type: "string", maxLength: 120, nullable: true },
+    configuracao: { ...conteudoClinico, description: "Intensidade/configuração conforme o modelo da instituição (ainda não validado): objeto plano, até 50 chaves, até 20 KB." },
+    observacoes: { type: "string", maxLength: 2000, nullable: true },
+    ativa: { type: "boolean", default: true },
+  },
+};
+
 const lgpd = "Em consultas, fisioterapia e avaliações, `observacoes`, `motivoStatus` e `observacaoRealizacao` voltam `null` "
   + "com `conteudoRestrito: true` para quem não tem a permissão clínica (`atendimento-clinico.visualizar` ou "
   + "`fisioterapia.visualizar`), exceto o próprio profissional do agendamento.";
@@ -382,6 +436,7 @@ export const tagsGrupo3 = [
   { name: "G3 · Equipe", description: "US-082, US-091, US-092, US-093. Cadastro único de colaboradores, disponibilidade e presença." },
   { name: "G3 · Escalas", description: "US-083, US-084. Escala de atendimento (planejado), cobertura necessária e lacunas." },
   { name: "G3 · Especialidades", description: "Catálogo de especialidades/áreas usado por colaborador, escala e cobertura." },
+  { name: "G3 · Fisioterapia", description: "US-075 a US-080. Planos, atividades, execução por sessão, evolução, rotina semanal e indicadores. Sessão = agendamento de categoria fisioterapia com `planoFisioterapiaId`. Leitura auditada." },
   { name: "G3 · Atendimento clínico", description: "US-085 a US-089. Registro clínico de consulta (rascunho → finalizado, correção por adendo), acompanhamento odontológico, tratamento externo e pendências do ciclo. Toda leitura é auditada." },
 ];
 
@@ -664,6 +719,7 @@ export const pathsGrupo3 = {
           duracaoMin: { type: "integer", minimum: 5, maximum: 720, description: "Padrão: duração do tipo." },
           local: { type: "string", maxLength: 120, nullable: true },
           observacoes: { type: "string", maxLength: 2000, nullable: true },
+          planoFisioterapiaId: { ...uuid, nullable: true, description: "Só em sessão de fisioterapia; plano ativo do mesmo idoso. Fora do período do plano: aviso `fora_do_periodo_do_plano`." },
         },
       },
       bodyExample: { idosoId: "p02", tipoId: exemploTipo.id, profissionalId: exemploColaborador.id, inicio: "2026-11-10T14:00:00-03:00", local: "Sala de fisioterapia", observacoes: "Treino de marcha com andador." },
@@ -975,6 +1031,148 @@ export const pathsGrupo3 = {
       bodyExample: { modo: "dias_corridos", dias: 180 },
       example: { modo: "dias_corridos", dias: 180 },
       description: "`semestre_civil` (jan–jun / jul–dez, padrão) ou `dias_corridos` (janela de `dias` até a referência). Auditado.",
+    }),
+  },
+  "/api/fisioterapia/planos": {
+    get: op("G3 · Fisioterapia", "Listar planos de fisioterapia", "fisioterapia.visualizar", {
+      query: [...pagina, query("idosoId", idosoId), query("situacao", { type: "string", enum: ["ativo", "suspenso", "concluido", "cancelado"] }), query("responsavelId", uuid)],
+      example: lista(exemploPlano), description: leituraAuditada,
+    }),
+    post: op("G3 · Fisioterapia", "Cadastrar plano de tratamento", "fisioterapia.criar", {
+      status: 201,
+      body: { ...corpoPlano, required: ["idosoId", ...corpoPlano.required], properties: { idosoId, ...corpoPlano.properties } },
+      bodyExample: { idosoId: "p02", responsavelId: exemploColaborador.id, objetivo: "Melhorar a marcha e reduzir o risco de quedas.", dataInicio: "2026-10-10", dataFim: "2027-01-08", frequenciaSemanal: 2 },
+      example: { ...exemploPlano, atividades: [] },
+      description: "Mais de um plano ativo por idoso é permitido. `vigente` = ativo e hoje dentro do período.",
+    }),
+  },
+  "/api/fisioterapia/planos/{id}": {
+    get: op("G3 · Fisioterapia", "Detalhe do plano (com atividades)", "fisioterapia.visualizar", {
+      params: [path("id")], errors: [404], example: { ...exemploPlano, atividades: [exemploAtividade] }, description: leituraAuditada,
+    }),
+    put: op("G3 · Fisioterapia", "Editar plano", "fisioterapia.editar", {
+      params: [path("id")], body: corpoPlano, errors: [404], example: { ...exemploPlano, atividades: [exemploAtividade] },
+      conflictExample: erro("Plano cancelado não pode ser alterado."),
+    }),
+  },
+  "/api/idosos/{idosoId}/planos-fisioterapia": {
+    get: op("G3 · Fisioterapia", "Planos de fisioterapia do idoso", "fisioterapia.visualizar", {
+      params: [path("idosoId", idosoId)], query: [...pagina, query("situacao", { type: "string", enum: ["ativo", "suspenso", "concluido", "cancelado"] })],
+      errors: [404], example: { idoso: { id: "p02", nome: "Antônio Pereira" }, ...lista(exemploPlano) }, description: leituraAuditada,
+    }),
+  },
+  "/api/fisioterapia/planos/{id}/atividades": {
+    get: op("G3 · Fisioterapia", "Atividades do plano", "fisioterapia.visualizar", { params: [path("id")], errors: [404], example: { planoId: exemploPlano.id, data: [exemploAtividade] } }),
+    post: op("G3 · Fisioterapia", "Definir atividade do plano", "fisioterapia.criar", {
+      status: 201, params: [path("id")], body: corpoAtividade,
+      bodyExample: { descricao: "Agachamento assistido", frequenciaSemanal: 2, duracaoMin: 10, intensidade: "Moderada", configuracao: { series: 3, repeticoes: 10 } },
+      errors: [404], example: exemploAtividade, conflictExample: erro("Plano concluído ou cancelado não recebe atividades."),
+    }),
+  },
+  "/api/fisioterapia/atividades/{id}": {
+    put: op("G3 · Fisioterapia", "Editar atividade", "fisioterapia.editar", {
+      params: [path("id")], body: corpoAtividade, errors: [404], example: exemploAtividade,
+      description: "Sem exclusão física: use `ativa: false`.",
+    }),
+  },
+  "/api/fisioterapia/atividades/{id}/execucoes": {
+    post: op("G3 · Fisioterapia", "Registrar realização da atividade na sessão", "fisioterapia.criar", {
+      status: 201, params: [path("id")],
+      body: {
+        type: "object", required: ["agendamentoId", "status"],
+        properties: {
+          agendamentoId: { ...uuid, description: "Sessão (agendamento de fisioterapia ligado ao plano da atividade)." },
+          status: { type: "string", enum: ["realizada", "parcial", "nao_realizada"] },
+          profissionalId: { ...uuid, nullable: true, description: "Padrão: profissional da sessão." },
+          observacoes: { type: "string", maxLength: 2000, nullable: true },
+        },
+      },
+      bodyExample: { agendamentoId: exemploAgendamento.id, status: "realizada", observacoes: "Sem dor." },
+      errors: [404],
+      example: {
+        id: "7a8b9c0d-1e2f-4a3b-c4d5-e6f7a8b9c0d1", sessao: { agendamentoId: exemploAgendamento.id, inicio: exemploAgendamento.inicio },
+        atividade: { id: exemploAtividade.id, descricao: exemploAtividade.descricao }, profissional: { id: exemploColaborador.id, nome: "Renata Gouveia" },
+        status: "realizada", observacoes: "Sem dor.", registradoEm: "2026-11-10T17:45:00.000Z", registradoPor: { id: "s06", nome: "Renata Gouveia" },
+      },
+      conflictExample: erro("Esta atividade já foi registrada nesta sessão."),
+      description: "Sempre dentro de uma sessão: uma execução por atividade e sessão (409). A sessão precisa estar ligada ao plano da atividade (422), não cancelada nem não realizada (409) e já iniciada, respeitando a tolerância do tipo (422). Execução é imutável.",
+    }),
+  },
+  "/api/fisioterapia/planos/{id}/execucoes": {
+    get: op("G3 · Fisioterapia", "Execuções do plano", "fisioterapia.visualizar", {
+      params: [path("id")], query: [...pagina, query("agendamentoId", uuid)], errors: [404], description: leituraAuditada,
+    }),
+  },
+  "/api/fisioterapia/planos/{id}/evolucoes": {
+    get: op("G3 · Fisioterapia", "Evolução do plano (linha cronológica)", "fisioterapia.visualizar", {
+      params: [path("id")], query: pagina, errors: [404],
+      example: lista({ id: "8b9c0d1e-2f3a-4b4c-d5e6-f7a8b9c0d1e2", planoId: exemploPlano.id, agendamentoId: exemploAgendamento.id, texto: "Caminhou 20 m com andador sem dor.", registradoEm: "2026-11-10T17:50:00.000Z", autor: { id: "s06", nome: "Renata Gouveia" }, publicacao: { status: "aguardando_permissao", prontuarioRef: null } }),
+      description: `Ordem cronológica crescente. ${leituraAuditada}`,
+    }),
+    post: op("G3 · Fisioterapia", "Registrar evolução do plano", "fisioterapia.criar", {
+      status: 201, params: [path("id")],
+      body: { type: "object", required: ["texto"], properties: { texto: { type: "string", minLength: 10, maxLength: 8000 }, agendamentoId: { ...uuid, nullable: true, description: "Sessão do mesmo plano (opcional)." } } },
+      bodyExample: { texto: "Caminhou 20 m com andador sem dor.", agendamentoId: exemploAgendamento.id },
+      errors: [404],
+      description: "Imutável. Publicada no prontuário se o autor tem `evolucao.create`; senão `publicacao.status = \"aguardando_permissao\"` (mesma regra do registro clínico).",
+    }),
+  },
+  "/api/fisioterapia/evolucoes/republicar-pendentes": {
+    post: op("G3 · Fisioterapia", "Republicar evoluções pendentes no prontuário", "fisioterapia.administrar", {
+      example: { verificados: 2, publicados: 1, aguardandoPermissao: 1 },
+      description: "Publica, em nome do autor, as evoluções pendentes cujo autor agora tem `evolucao.create`. Idempotente.",
+    }),
+  },
+  "/api/fisioterapia/planos/{id}/programar-semana": {
+    post: op("G3 · Fisioterapia", "Programar as sessões da semana", "fisioterapia.criar e agenda.criar", {
+      status: 201, params: [path("id")],
+      body: {
+        type: "object", required: ["semana", "tipoId", "sessoes"],
+        properties: {
+          semana: { ...dataDia, description: "Qualquer dia da semana (segunda a domingo)." },
+          tipoId: { ...uuid, description: "Tipo de atendimento da categoria fisioterapia." },
+          local: { type: "string", maxLength: 120, nullable: true },
+          sessoes: {
+            type: "array", minItems: 1, maxItems: 14,
+            items: {
+              type: "object", required: ["diaSemana", "hora"],
+              properties: {
+                diaSemana: { type: "integer", minimum: 1, maximum: 7 }, hora: horario,
+                duracaoMin: { type: "integer", minimum: 5, maximum: 720 },
+                profissionalId: { ...uuid, nullable: true, description: "Padrão: responsável do plano." },
+              },
+            },
+          },
+        },
+      },
+      bodyExample: { semana: "2026-11-09", tipoId: exemploTipo.id, sessoes: [{ diaSemana: 1, hora: "09:00" }, { diaSemana: 3, hora: "09:00" }] },
+      errors: [404],
+      example: { planoId: exemploPlano.id, sessoes: [{ ...exemploAgendamento, planoFisioterapiaId: exemploPlano.id, avisos: [] }] },
+      conflictExample: erro("Sessão 2: O profissional já tem agendamento nesse horário.", { sessao: 1, conflitos: exemploConflito.error.details.conflitos }),
+      description: "Cria as sessões ligadas ao plano com a mesma validação de `POST /api/agendamentos` (conflito, lembretes, histórico). Tudo ou nada: se uma sessão falha, nenhuma é criada e `details.sessao` aponta qual.",
+    }),
+  },
+  "/api/fisioterapia/rotina-semanal": {
+    get: op("G3 · Fisioterapia", "Rotina semanal e carga por dia", "fisioterapia.visualizar", {
+      query: [query("semana", dataDia, "Qualquer dia da semana. Padrão: hoje."), query("profissionalId", uuid)],
+      example: {
+        semana: { inicio: "2026-11-09", fim: "2026-11-15", fuso: "America/Sao_Paulo" },
+        resumo: { sessoesNaCarga: 2, minutosNaCarga: 80, canceladas: 1, naoRealizadas: 0 },
+        cargaPorDia: [{ data: "2026-11-09", diaSemana: 1, sessoes: 1, minutos: 40, porProfissional: [{ id: exemploColaborador.id, nome: "Renata Gouveia", sessoes: 1, minutos: 40 }] }],
+        sessoes: [exemploAgendamento],
+      },
+      description: `A carga por dia conta só sessões \`agendado\` e \`realizado\`; \`sessoes\` lista todas. ${lgpd}`,
+    }),
+  },
+  "/api/fisioterapia/indicadores": {
+    get: op("G3 · Fisioterapia", "Indicadores da fisioterapia", "fisioterapia.visualizar", {
+      query: [query("inicio", dataDia, "Padrão: primeiro dia do mês."), query("fim", dataDia, "Padrão: hoje.")],
+      example: {
+        periodo: { inicio: "2026-11-01", fim: "2026-11-09" },
+        planos: { ativos: 12, idososEmFisioterapia: 11, suspensos: 1, concluidos: 4 },
+        sessoes: { previstas: 40, realizadas: 30, naoRealizadas: 2, agendadas: 8, canceladas: 3, taxaRealizacao: 93.8 },
+      },
+      description: "Planos ativos = situação `ativo` e hoje dentro do período. Sessões do período: previstas = não canceladas; `taxaRealizacao` = realizadas ÷ (realizadas + não realizadas), em %. Sem dados do idoso.",
     }),
   },
   "/api/idosos/{idosoId}/atendimentos": {
