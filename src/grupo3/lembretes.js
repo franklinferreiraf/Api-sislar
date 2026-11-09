@@ -124,6 +124,16 @@ export async function processarLembretes({ agora = new Date(), limite = 50, envi
         resumo.cancelados += 1;
         continue;
       }
+      // Atendimento que já começou (ex.: job parado por um tempo) não recebe lembrete atrasado.
+      if (item.inicio.getTime() <= agora.getTime()) {
+        await tx.$executeRaw`
+          UPDATE grupo3.lembrete_agendamento
+          SET status = 'cancelado', ultimo_erro = 'Atendimento já iniciado antes do envio.'
+          WHERE id = ${item.id}::uuid
+        `;
+        resumo.cancelados += 1;
+        continue;
+      }
       if (!item.usuario_id || !item.usuario_ativo) {
         await tx.$executeRaw`
           UPDATE grupo3.lembrete_agendamento

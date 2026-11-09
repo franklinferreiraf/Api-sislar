@@ -3,26 +3,55 @@
 // usa FOR UPDATE SKIP LOCKED para não processar o mesmo item duas vezes.
 import { processarLembretes } from "./lembretes.js";
 
-const JOBS = [{ nome: "lembretes", executar: () => processarLembretes() }];
+export const JOBS_PADRAO = [{ nome: "lembretes", executar: () => processarLembretes() }];
 
-export function iniciarJobs({ intervaloSeg = Number(process.env.JOBS_INTERVALO_SEG || 60) } = {}) {
+let timerAtual = null;
+
+/**
+ * Executa uma rodada. Cada job tem try/catch próprio: um erro vira log e nunca rejeita a promessa
+ * (no Node 20 uma rejeição não tratada encerra o processo). Se a rodada anterior de um job ainda está
+ * rodando, a nova rodada desse job é pulada.
+ */
+export function criarRodada(jobs, { log = console } = {}) {
   const emExecucao = new Set();
-  const rodar = async () => {
-    for (const job of JOBS) {
-      if (emExecucao.has(job.nome)) continue;
+  return async function rodar() {
+    await Promise.all(jobs.map(async (job) => {
+      if (emExecucao.has(job.nome)) return;
       emExecucao.add(job.nome);
       try {
         const resumo = await job.executar();
-        if (resumo?.processados) console.log(`[grupo3:${job.nome}]`, JSON.stringify(resumo));
+        if (resumo?.processados) log.log(`[grupo3:${job.nome}] ${JSON.stringify(resumo)}`);
       } catch (error) {
-        // Log técnico sem dados do idoso.
-        console.error(`[grupo3:${job.nome}] falhou: ${error?.message || error}`);
+        // Só a mensagem técnica: sem payload, idoso ou destinatário.
+        try {
+          log.error(`[grupo3:${job.nome}] falhou: ${error?.message || "erro desconhecido"}`);
+        } catch {
+          // Nem o log pode derrubar o processo.
+        }
       } finally {
         emExecucao.delete(job.nome);
       }
-    }
+    }));
   };
-  const timer = setInterval(rodar, Math.max(intervaloSeg, 10) * 1000);
-  timer.unref();
-  return () => clearInterval(timer);
+}
+
+export function iniciarJobs({
+  intervaloSeg = Number(process.env.JOBS_INTERVALO_SEG || 60),
+  jobs = JOBS_PADRAO,
+  log = console,
+} = {}) {
+  pararJobs();
+  const rodar = criarRodada(jobs, { log });
+  timerAtual = setInterval(() => {
+    rodar().catch(() => {});
+  }, Math.max(intervaloSeg, 10) * 1000);
+  timerAtual.unref?.();
+  return pararJobs;
+}
+
+export function pararJobs() {
+  if (timerAtual) {
+    clearInterval(timerAtual);
+    timerAtual = null;
+  }
 }

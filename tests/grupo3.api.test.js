@@ -250,6 +250,19 @@ describe("grupo3 · tolerância e correção da realização", () => {
     assert.equal((await post("gestor", `/api/agendamentos/${cancelado.body.id}/corrigir-realizacao`, { status: "realizado", motivo: "Teste" })).status, 409);
   });
 
+  it("a liberação da correção vale só para a própria transação", async () => {
+    const alvo = await agendar("recepcao", { inicio: "2025-04-10T10:00:00-03:00" });
+    await post("recepcao", `/api/agendamentos/${alvo.body.id}/realizacao`, { status: "realizado" });
+    const corrigido = await post("gestor", `/api/agendamentos/${alvo.body.id}/corrigir-realizacao`, { status: "nao_realizado", motivo: "Ajuste de lançamento" });
+    assert.equal(corrigido.status, 200);
+    // Várias tentativas para passar por conexões diferentes do pool, inclusive a usada na correção.
+    for (let i = 0; i < 5; i += 1) {
+      await assert.rejects(prisma.$executeRaw`UPDATE grupo3.agendamento SET status = 'realizado' WHERE id = ${alvo.body.id}::uuid`);
+    }
+    const flag = await prisma.$queryRaw`SELECT coalesce(current_setting('grupo3.correcao_realizacao', true), '') AS valor`;
+    assert.notEqual(flag[0].valor, "on");
+  });
+
   it("o banco continua bloqueando alteração direta de agendamento encerrado", async () => {
     const alvo = await agendar("recepcao", { inicio: "2025-03-10T10:00:00-03:00" });
     await post("recepcao", `/api/agendamentos/${alvo.body.id}/realizacao`, { status: "realizado" });
@@ -502,5 +515,61 @@ describe("grupo3 · lembretes (US-074)", () => {
     const criado = await agendar("recepcao", { profissionalId: renata, inicio: "2030-04-11T10:00:00-03:00" });
     assert.equal((await get("voluntaria", `/api/agendamentos/${criado.body.id}/lembretes`)).status, 403);
     assert.equal((await get("fisio", `/api/agendamentos/${criado.body.id}/lembretes`)).status, 200);
+  });
+});
+
+describe("grupo3 · lembretes — regras de início e destinatário", () => {
+  let renata;
+  let paulo;
+
+  before(async () => {
+    renata = await colaboradorPorNome("Renata Gouveia");
+    paulo = await colaboradorPorNome("Dr. Paulo Ferraz Neto");
+  });
+
+  it("agendamento com início no passado não gera lembrete", async () => {
+    const passado = await agendar("recepcao", { profissionalId: renata, inicio: "2025-06-01T10:00:00-03:00" });
+    assert.equal(passado.status, 201);
+    assert.deepEqual(await lembretes("recepcao", passado.body.id), []);
+  });
+
+  it("troca de profissional no reagendamento cancela os lembretes e gera para o novo", async () => {
+    const criado = await agendar("recepcao", { profissionalId: renata, inicio: "2030-05-02T10:00:00-03:00" });
+    const reagendado = await post("recepcao", `/api/agendamentos/${criado.body.id}/reagendar`, {
+      inicio: "2030-05-02T10:00:00-03:00", profissionalId: paulo, motivo: "Fisioterapeuta de férias",
+    });
+    assert.equal(reagendado.status, 200);
+    const lista = await lembretes("recepcao", criado.body.id);
+    const antigo = lista.find((item) => item.destinatario.colaboradorId === renata);
+    const novo = lista.find((item) => item.destinatario.colaboradorId === paulo);
+    assert.equal(antigo.status, "cancelado");
+    assert.equal(novo.status, "pendente");
+    assert.equal(novo.destinatario.usuarioId, "s05");
+  });
+
+  it("vincular usuário só reenfileira lembretes de agendamentos futuros ainda agendados", async () => {
+    const colaborador = (await post("gestor", "/api/colaboradores", { nome: "Nutricionista de teste", vinculo: "externo" })).body.id;
+    const futuro = await agendar("recepcao", { profissionalId: colaborador, inicio: "2030-05-03T10:00:00-03:00" });
+    const passado = await agendar("recepcao", { profissionalId: colaborador, inicio: "2025-06-02T10:00:00-03:00" });
+    // Lembrete órfão de um atendimento que já passou (ex.: gerado antes de o horário vencer).
+    await prisma.$executeRaw`
+      INSERT INTO grupo3.lembrete_agendamento (agendamento_id, colaborador_id, antecedencia_min, enviar_em, status)
+      VALUES (${passado.body.id}::uuid, ${colaborador}::uuid, 1440, '2025-06-01T13:00:00Z', 'sem_destinatario')
+    `;
+    const vinculo = await request(app).put(`/api/colaboradores/${colaborador}`).set(await como("gestor"))
+      .send({ nome: "Nutricionista de teste", vinculo: "externo", usuarioId: "s17" });
+    assert.equal(vinculo.status, 200);
+    assert.equal((await lembretes("recepcao", futuro.body.id))[0].status, "pendente");
+    assert.equal((await lembretes("recepcao", passado.body.id))[0].status, "sem_destinatario");
+  });
+
+  it("job não envia lembrete de atendimento que já começou", async () => {
+    const proximo = await agendar("recepcao", { profissionalId: renata, inicio: new Date(Date.now() + 200 * 60_000).toISOString() });
+    assert.equal(proximo.status, 201);
+    assert.equal((await lembretes("recepcao", proximo.body.id))[0].status, "pendente");
+    await processarLembretes({ agora: new Date(Date.now() + 240 * 60_000), enviar: async () => assert.fail("não devia enviar") });
+    const [item] = await lembretes("recepcao", proximo.body.id);
+    assert.equal(item.status, "cancelado");
+    assert.match(item.ultimoErro, /já iniciado/);
   });
 });
