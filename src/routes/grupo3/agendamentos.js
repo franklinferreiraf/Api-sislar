@@ -24,7 +24,9 @@ import {
 } from "../../grupo3/agenda.js";
 import { buscarIdoso } from "../../grupo3/portas/idosos.js";
 import { podeVerIdoso } from "../../grupo3/portas/prontuario.js";
-import { calcularFim, exigeMotivo, mascarar, mascararHistorico, motivoValido, podeAlterar } from "../../grupo3/regras.js";
+import {
+  calcularFim, exigeMotivo, mascarar, mascararHistorico, motivoValido, podeAlterar, podeRegistrarRealizacao,
+} from "../../grupo3/regras.js";
 import {
   categoria,
   dataHora,
@@ -364,7 +366,8 @@ router.post(
       }
       await tx.$executeRaw`
         UPDATE grupo3.agendamento
-        SET status = 'cancelado', motivo_status = ${req.body.motivo ?? null}, concluido_em = now()
+        SET status = 'cancelado', motivo_status = ${req.body.motivo ?? null}, concluido_em = now(),
+            registrado_por_ref = ${req.user.ref}::uuid
         WHERE id = ${atual.id}::uuid
       `;
       await registrarHistorico(tx, {
@@ -382,6 +385,7 @@ router.post(
 );
 
 // US-069 — realizado / não realizado, com responsável e observação.
+// O responsável padrão é o profissional do agendamento; quem registrou fica em registrado_por_ref.
 router.post(
   "/agendamentos/:id/realizacao",
   requirePerm("agenda.editar"),
@@ -397,17 +401,17 @@ router.post(
       const atual = await travarAgendamento(tx, req.params.id);
       if (!atual) notFound("Agendamento não encontrado.");
       if (!podeAlterar(atual.status)) throw new HttpError(409, `Agendamento já está ${atual.status.replace("_", " ")}.`);
-      if (atual.inicio.getTime() > Date.now()) throw erroCampo("status", "Não é possível registrar a realização antes do horário de início.");
-      let responsavelId = b.responsavelId;
-      if (responsavelId) {
-        if (!(await carregarProfissional(tx, responsavelId))) throw erroCampo("responsavelId", "Responsável não encontrado.");
-      } else {
-        responsavelId = (await colaboradorDoUsuario(req.user, tx))?.id ?? atual.profissional_id;
+      if (!podeRegistrarRealizacao(atual.inicio, atual.tolerancia_realizacao_min)) {
+        throw erroCampo("status", `A realização só pode ser registrada a partir de ${atual.tolerancia_realizacao_min} min antes do início.`);
+      }
+      const responsavelId = b.responsavelId ?? atual.profissional_id;
+      if (b.responsavelId && !(await carregarProfissional(tx, responsavelId))) {
+        throw erroCampo("responsavelId", "Responsável não encontrado.");
       }
       await tx.$executeRaw`
         UPDATE grupo3.agendamento
         SET status = ${b.status}::grupo3.status_agendamento, responsavel_realizacao_id = ${responsavelId}::uuid,
-            observacao_realizacao = ${b.observacao ?? null}, concluido_em = now()
+            observacao_realizacao = ${b.observacao ?? null}, concluido_em = now(), registrado_por_ref = ${req.user.ref}::uuid
         WHERE id = ${atual.id}::uuid
       `;
       await registrarHistorico(tx, {
@@ -417,6 +421,60 @@ router.post(
       await audit(tx, {
         userId: req.user.id, action: `agendamento.${b.status}`, entity: "grupo3.agendamento", entityId: atual.id,
         payload: { resultado: "sucesso", responsavelId },
+      });
+    });
+    const colaborador = await colaboradorDoUsuario(req.user);
+    res.json(mascarar(await buscarAgendamento(req.params.id), req.user, colaborador?.id));
+  }),
+);
+
+// Correção de realização já registrada. Só administração da agenda, com motivo. O gatilho do banco
+// só aceita esta alteração com grupo3.correcao_realizacao ligado na transação e apenas nos campos
+// da realização.
+router.post(
+  "/agendamentos/:id/corrigir-realizacao",
+  requirePerm("agenda.administrar"),
+  validate(idParam, "params"),
+  validate(z.object({
+    motivo,
+    status: z.enum(["realizado", "nao_realizado"]).optional(),
+    responsavelId: uuid.optional(),
+    observacao: texto(2000).nullable().optional(),
+  })),
+  asyncHandler(async (req, res) => {
+    const b = req.body;
+    await prisma.$transaction(async (tx) => {
+      const atual = await travarAgendamento(tx, req.params.id);
+      if (!atual) notFound("Agendamento não encontrado.");
+      if (!["realizado", "nao_realizado"].includes(atual.status)) {
+        throw new HttpError(409, "Só é possível corrigir agendamento realizado ou não realizado.");
+      }
+      if (b.responsavelId && !(await carregarProfissional(tx, b.responsavelId))) {
+        throw erroCampo("responsavelId", "Responsável não encontrado.");
+      }
+      const anterior = {
+        status: atual.status, responsavelId: atual.responsavel_realizacao_id, observacaoRealizacao: atual.observacao_realizacao,
+      };
+      const novo = {
+        status: b.status ?? anterior.status,
+        responsavelId: b.responsavelId ?? anterior.responsavelId,
+        observacaoRealizacao: b.observacao !== undefined ? b.observacao : anterior.observacaoRealizacao,
+      };
+      if (Object.keys(novo).every((campo) => novo[campo] === anterior[campo])) {
+        throw erroCampo("status", "Informe ao menos um campo diferente do registro atual.");
+      }
+      await tx.$queryRaw`SELECT set_config('grupo3.correcao_realizacao', 'on', true)`;
+      await tx.$executeRaw`
+        UPDATE grupo3.agendamento
+        SET status = ${novo.status}::grupo3.status_agendamento, responsavel_realizacao_id = ${novo.responsavelId}::uuid,
+            observacao_realizacao = ${novo.observacaoRealizacao}
+        WHERE id = ${atual.id}::uuid
+      `;
+      await tx.$queryRaw`SELECT set_config('grupo3.correcao_realizacao', 'off', true)`;
+      await registrarHistorico(tx, { agendamentoId: atual.id, acao: "corrigido", anterior, novo, motivo: b.motivo, autorRef: req.user.ref });
+      await audit(tx, {
+        userId: req.user.id, action: "agendamento.corrigir_realizacao", entity: "grupo3.agendamento", entityId: atual.id,
+        payload: { resultado: "sucesso", anterior: { status: anterior.status, responsavelId: anterior.responsavelId }, novo: { status: novo.status, responsavelId: novo.responsavelId } },
       });
     });
     const colaborador = await colaboradorDoUsuario(req.user);

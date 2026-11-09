@@ -25,11 +25,13 @@ const selectSql = Prisma.sql`
          t.permite_sobreposicao,
          p.id AS profissional_id, p.nome AS profissional_nome,
          r.id AS responsavel_id, r.nome AS responsavel_nome,
+         ru.id AS registrado_por_id, ru.name AS registrado_por_nome,
          (${conflitoSql}) AS em_conflito
   FROM grupo3.agendamento a
   JOIN grupo3.tipo_atendimento t ON t.id = a.tipo_id
   JOIN grupo3.colaborador p ON p.id = a.profissional_id
   LEFT JOIN grupo3.colaborador r ON r.id = a.responsavel_realizacao_id
+  LEFT JOIN public.users ru ON ru.ref = a.registrado_por_ref
 `;
 
 function paraAgendamento(row, idosos) {
@@ -48,6 +50,7 @@ function paraAgendamento(row, idosos) {
     motivoStatus: row.motivo_status,
     responsavelRealizacao: row.responsavel_id ? { id: row.responsavel_id, nome: row.responsavel_nome } : null,
     observacaoRealizacao: row.observacao_realizacao,
+    registradoPor: row.registrado_por_id ? { id: row.registrado_por_id, nome: row.registrado_por_nome } : null,
     concluidoEm: row.concluido_em,
     criadoEm: row.criado_em,
     atualizadoEm: row.atualizado_em,
@@ -94,9 +97,9 @@ export async function buscarAgendamento(id, db = prisma) {
 export async function travarAgendamento(tx, id) {
   const rows = await tx.$queryRaw`
     SELECT a.id, a.idoso_ref, a.tipo_id, a.profissional_id, a.inicio, a.fim, a.duracao_min,
-           a.status::text AS status,
+           a.status::text AS status, a.responsavel_realizacao_id, a.observacao_realizacao,
            t.categoria::text AS categoria, t.permite_sobreposicao,
-           t.exige_motivo_cancelamento, t.exige_motivo_reagendamento
+           t.exige_motivo_cancelamento, t.exige_motivo_reagendamento, t.tolerancia_realizacao_min
     FROM grupo3.agendamento a
     JOIN grupo3.tipo_atendimento t ON t.id = a.tipo_id
     WHERE a.id = ${id}::uuid

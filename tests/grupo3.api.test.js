@@ -197,10 +197,63 @@ describe("grupo3 · reagendar, cancelar e realizar (US-068, US-069)", () => {
     const feito = await post("fisio", `/api/agendamentos/${passado.body.id}/realizacao`, { status: "nao_realizado", observacao: "Idoso recusou" });
     assert.equal(feito.status, 200);
     assert.equal(feito.body.status, "nao_realizado");
-    assert.equal(feito.body.responsavelRealizacao.nome, "Renata Gouveia");
+    assert.equal(feito.body.responsavelRealizacao.id, profissional);
+    assert.equal(feito.body.registradoPor.id, "s06");
     assert.ok(feito.body.concluidoEm);
     assert.equal((await post("recepcao", `/api/agendamentos/${passado.body.id}/realizacao`, { status: "realizado" })).status, 409);
     assert.equal((await post("recepcao", `/api/agendamentos/${passado.body.id}/cancelar`, { motivo: "Engano" })).status, 409);
+  });
+});
+
+describe("grupo3 · tolerância e correção da realização", () => {
+  const daquiA = (minutos) => new Date(Date.now() + minutos * 60_000).toISOString();
+
+  it("aceita realização dentro da tolerância do tipo e recusa fora dela", async () => {
+    const dentro = await agendar("recepcao", { inicio: daquiA(30) });
+    const fora = await agendar("recepcao", { inicio: daquiA(180) });
+    assert.equal((await post("recepcao", `/api/agendamentos/${dentro.body.id}/realizacao`, { status: "realizado" })).status, 200);
+    const recusa = await post("recepcao", `/api/agendamentos/${fora.body.id}/realizacao`, { status: "realizado" });
+    assert.equal(recusa.status, 422);
+    assert.match(recusa.body.error.details[0].message, /60 min/);
+    const semTolerancia = await post("admin", "/api/tipos-atendimento", {
+      nome: "Teste sem tolerância", categoria: "outro", duracaoPadraoMin: 20, toleranciaRealizacaoMin: 0,
+    });
+    assert.equal(semTolerancia.body.toleranciaRealizacaoMin, 0);
+    const cedo = await agendar("recepcao", { tipoId: semTolerancia.body.id, inicio: daquiA(300) });
+    assert.equal((await post("recepcao", `/api/agendamentos/${cedo.body.id}/realizacao`, { status: "realizado" })).status, 422);
+  });
+
+  it("corrige realização só com agenda.administrar e motivo, e registra no histórico", async () => {
+    const alvo = await agendar("recepcao", { inicio: "2025-02-10T10:00:00-03:00" });
+    await post("recepcao", `/api/agendamentos/${alvo.body.id}/realizacao`, { status: "realizado", observacao: "Feito" });
+    const url = `/api/agendamentos/${alvo.body.id}/corrigir-realizacao`;
+    assert.equal((await post("recepcao", url, { status: "nao_realizado", motivo: "Registro no idoso errado" })).status, 403);
+    assert.equal((await post("gestor", url, { status: "nao_realizado" })).status, 422);
+    assert.equal((await post("gestor", url, { status: "realizado", motivo: "Sem mudança real" })).status, 422);
+    const corrigido = await post("gestor", url, { status: "nao_realizado", observacao: "Idoso dormia", motivo: "Lançado como realizado por engano" });
+    assert.equal(corrigido.status, 200);
+    assert.equal(corrigido.body.status, "nao_realizado");
+    assert.equal(corrigido.body.observacaoRealizacao, "Idoso dormia");
+    assert.equal(corrigido.body.registradoPor.id, "s09");
+    const historico = await get("gestor", `/api/agendamentos/${alvo.body.id}/historico`);
+    const item = historico.body.data.find((linha) => linha.acao === "corrigido");
+    assert.equal(item.anterior.status, "realizado");
+    assert.equal(item.novo.status, "nao_realizado");
+    assert.equal(item.motivo, "Lançado como realizado por engano");
+    assert.equal(item.autor.id, "s02");
+    const cancelado = await agendar("recepcao", { inicio: em("21", "10:00") });
+    await post("recepcao", `/api/agendamentos/${cancelado.body.id}/cancelar`, { motivo: "Sem vaga" });
+    assert.equal((await post("gestor", `/api/agendamentos/${cancelado.body.id}/corrigir-realizacao`, { status: "realizado", motivo: "Teste" })).status, 409);
+  });
+
+  it("o banco continua bloqueando alteração direta de agendamento encerrado", async () => {
+    const alvo = await agendar("recepcao", { inicio: "2025-03-10T10:00:00-03:00" });
+    await post("recepcao", `/api/agendamentos/${alvo.body.id}/realizacao`, { status: "realizado" });
+    await assert.rejects(prisma.$executeRaw`UPDATE grupo3.agendamento SET status = 'nao_realizado' WHERE id = ${alvo.body.id}::uuid`);
+    await assert.rejects(prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT set_config('grupo3.correcao_realizacao', 'on', true)`;
+      await tx.$executeRaw`UPDATE grupo3.agendamento SET inicio = inicio + interval '1 hour' WHERE id = ${alvo.body.id}::uuid`;
+    }));
   });
 });
 

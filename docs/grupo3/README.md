@@ -14,6 +14,30 @@ Backend dos épicos E07 (agenda, cuidados e atendimentos), E08 (fisioterapia), E
 
 As suposições e as decisões pendentes estão em [decisoes-pendentes.md](decisoes-pendentes.md).
 
+## Rodar os testes com o banco em outra porta
+
+`npm test` recria o banco `sislar_test` no servidor apontado por `DATABASE_URL`; com `NODE_ENV=test`, `src/config.js` troca o nome do banco para `sislar_test`. Se a porta 5432 já estiver ocupada por outro Postgres, suba um container só para os testes em outra porta:
+
+```bash
+docker run -d --name sislar-check-pg   -e POSTGRES_USER=sislar -e POSTGRES_PASSWORD=sislar -e POSTGRES_DB=sislar   -p 55433:5432 postgres:16-alpine
+```
+
+Depois rode os testes apontando para essa porta.
+
+Bash / Git Bash:
+
+```bash
+DATABASE_URL=postgres://sislar:sislar@localhost:55433/sislar npm test
+```
+
+PowerShell:
+
+```powershell
+$env:DATABASE_URL = "postgres://sislar:sislar@localhost:55433/sislar"; npm test
+```
+
+Também dá para gravar `DATABASE_URL` no `.env`; uma variável já definida no ambiente tem prioridade sobre ele. No Windows, pare antes qualquer `node src/server.js` em execução: o servidor segura a DLL do Prisma e o `prisma generate` do `npm test` falha com `EPERM`. Para remover o container no fim: `docker rm -f sislar-check-pg`.
+
 ## Onde fica cada coisa
 
 | Caminho | Conteúdo |
@@ -58,6 +82,7 @@ erDiagram
         bool exige_motivo_cancelamento
         bool exige_motivo_reagendamento
         bool permite_sobreposicao
+        int tolerancia_realizacao_min "padrão 60"
         bool ativo
     }
     AGENDAMENTO {
@@ -74,13 +99,14 @@ erDiagram
         text motivo_status
         uuid responsavel_realizacao_id FK
         text observacao_realizacao
+        uuid registrado_por_ref "users.ref de quem registrou"
         timestamptz concluido_em
         uuid criado_por_ref "users.ref"
     }
     HISTORICO_AGENDAMENTO {
         uuid id PK
         uuid agendamento_id FK
-        text acao "criado | reagendado | cancelado | realizado | nao_realizado"
+        text acao "criado | reagendado | cancelado | realizado | nao_realizado | corrigido"
         jsonb anterior
         jsonb novo
         text motivo
@@ -95,14 +121,15 @@ Integridade garantida no banco:
 - Agendamento encerrado (realizado, não realizado ou cancelado) não pode ser alterado.
 - Agendamento, tipo e colaborador não aceitam `DELETE`: o caminho é cancelar ou inativar.
 - `historico_agendamento` não aceita `UPDATE` nem `DELETE`.
-- `CHECK`: status diferente de `agendado` ⇔ `concluido_em` preenchido. Realizado ou não realizado exige responsável.
+- Exceção única à imutabilidade: `POST /agendamentos/{id}/corrigir-realizacao` liga `grupo3.correcao_realizacao` na transação. Com isso, o gatilho aceita trocar só status (entre realizado e não realizado), responsável e observação da realização.
+- `CHECK`: status diferente de `agendado` ⇔ `concluido_em` e `registrado_por_ref` preenchidos. Realizado ou não realizado exige responsável.
 - Índice parcial `(profissional_id, inicio) WHERE status = 'agendado'` para a checagem de conflito.
 
 ## Regras de negócio
 
 **Conflito (US-073).** Há conflito quando o mesmo profissional tem outro agendamento `agendado` cujo intervalo `[inicio, fim)` se sobrepõe ao novo. Encostar no fim do anterior não é conflito. Cancelado, realizado e não realizado não conflitam. A sobreposição só é permitida quando o novo e o existente são do **mesmo tipo** e esse tipo tem `permite_sobreposicao = true`; qualquer outra combinação é conflito. A checagem roda dentro da transação, depois de um `pg_advisory_xact_lock` por profissional, então duas gravações simultâneas no mesmo horário não passam juntas. No reagendamento, a checagem ignora o próprio agendamento. Conflito responde `409` com `error.details.conflitos`. `POST /api/agendamentos/verificar-conflitos` faz a mesma checagem sem gravar.
 
-**Status (US-068, US-069).** `agendado → realizado | nao_realizado | cancelado`. Reagendar mantém o mesmo registro e grava `anterior → novo` no histórico. O motivo é obrigatório conforme a configuração do tipo. A realização só pode ser registrada depois do horário de início.
+**Status (US-068, US-069).** `agendado → realizado | nao_realizado | cancelado`. Reagendar mantém o mesmo registro e grava `anterior → novo` no histórico. O motivo é obrigatório conforme a configuração do tipo. A realização pode ser registrada a partir de `tolerancia_realizacao_min` minutos antes do início (configurável por tipo, padrão 60); antes disso a resposta é 422. O responsável padrão é o profissional do agendamento, e quem registrou fica em `registrado_por_ref` (`registradoPor` na API), no histórico e na auditoria. Para corrigir uma realização já registrada, use `corrigir-realizacao` (só `agenda.administrar`, motivo obrigatório); a correção entra no histórico como `corrigido`.
 
 **Agenda (US-066).** Dia, semana (segunda a domingo) ou mês, calculados no fuso da instituição (`grupo3.configuracao.fuso_horario`, padrão `America/Sao_Paulo`). Cada item traz `status` e `emConflito`; o `resumo` conta os itens por status e os em conflito.
 
@@ -130,6 +157,7 @@ A documentação completa, com exemplos e erros, está em `/api/docs`.
 | `POST /api/agendamentos/{id}/reagendar` | `agenda.editar` | 068, 073 |
 | `POST /api/agendamentos/{id}/cancelar` | `agenda.editar` | 068 |
 | `POST /api/agendamentos/{id}/realizacao` | `agenda.editar` | 069 |
+| `POST /api/agendamentos/{id}/corrigir-realizacao` | `agenda.administrar` | 069 |
 | `GET /api/agendamentos/{id}/historico` | `agenda.visualizar` ou ser o profissional | 068 |
 | `GET /api/colaboradores/{id}/agenda?visao=dia\|semana\|mes&data=` | `agenda.visualizar` | 066 |
 | `GET /api/me/agenda?visao=&data=` | sessão autenticada | 066 |
@@ -170,7 +198,7 @@ Usa a auditoria da Fundação (`public.audit_log`, via `audit()` em `src/db/help
 |---|---|
 | `tipo_atendimento.criar` · `editar` · `ativar` · `inativar` | Alterações em tipos |
 | `colaborador.criar` · `editar` · `ativar` · `inativar` | Alterações em colaboradores |
-| `agendamento.criar` · `reagendar` · `cancelar` · `realizado` · `nao_realizado` | Alterações em agendamentos; criar e reagendar também registram recusas por conflito |
+| `agendamento.criar` · `reagendar` · `cancelar` · `realizado` · `nao_realizado` · `corrigir_realizacao` | Alterações em agendamentos; criar e reagendar também registram recusas por conflito |
 
 ## Contratos de integração
 

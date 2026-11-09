@@ -9,6 +9,7 @@ import {
   mascararHistorico,
   motivoValido,
   podeAlterar,
+  podeRegistrarRealizacao,
   podeTransitar,
   sobrepoe,
 } from "../src/grupo3/regras.js";
@@ -81,6 +82,14 @@ describe("grupo3 · status e motivo (US-068, US-069)", () => {
     assert.equal(podeTransitar("cancelado", "agendado"), false);
     assert.equal(podeAlterar("agendado"), true);
     assert.equal(podeAlterar("nao_realizado"), false);
+  });
+
+  it("realização respeita a tolerância antes do início", () => {
+    const inicio = new Date("2030-03-12T10:00:00Z");
+    assert.equal(podeRegistrarRealizacao(inicio, 60, new Date("2030-03-12T09:00:00Z")), true);
+    assert.equal(podeRegistrarRealizacao(inicio, 60, new Date("2030-03-12T08:59:59Z")), false);
+    assert.equal(podeRegistrarRealizacao(inicio, 0, new Date("2030-03-12T09:59:00Z")), false);
+    assert.equal(podeRegistrarRealizacao(inicio, 0, inicio), true);
   });
 
   it("motivo obrigatório segue a configuração do tipo", () => {

@@ -20,6 +20,7 @@ const corpo = z.object({
   exigeMotivoCancelamento: z.boolean().default(true),
   exigeMotivoReagendamento: z.boolean().default(true),
   permiteSobreposicao: z.boolean().default(false),
+  toleranciaRealizacaoMin: z.number().int().min(0).max(1440).default(60),
 });
 
 function paraTipo(row) {
@@ -32,6 +33,7 @@ function paraTipo(row) {
     exigeMotivoCancelamento: row.exige_motivo_cancelamento,
     exigeMotivoReagendamento: row.exige_motivo_reagendamento,
     permiteSobreposicao: row.permite_sobreposicao,
+    toleranciaRealizacaoMin: row.tolerancia_realizacao_min,
     ativo: row.ativo,
     criadoEm: row.criado_em,
     atualizadoEm: row.atualizado_em,
@@ -39,7 +41,8 @@ function paraTipo(row) {
 }
 
 const colunas = `id, nome, categoria::text AS categoria, descricao, duracao_padrao_min,
-  exige_motivo_cancelamento, exige_motivo_reagendamento, permite_sobreposicao, ativo, criado_em, atualizado_em`;
+  exige_motivo_cancelamento, exige_motivo_reagendamento, permite_sobreposicao, tolerancia_realizacao_min,
+  ativo, criado_em, atualizado_em`;
 
 async function buscar(id, db = prisma) {
   const rows = await db.$queryRawUnsafe(`SELECT ${colunas} FROM grupo3.tipo_atendimento WHERE id = $1::uuid`, id);
@@ -95,10 +98,10 @@ router.post(
       const rows = await tx.$queryRaw`
         INSERT INTO grupo3.tipo_atendimento (
           nome, categoria, descricao, duracao_padrao_min,
-          exige_motivo_cancelamento, exige_motivo_reagendamento, permite_sobreposicao
+          exige_motivo_cancelamento, exige_motivo_reagendamento, permite_sobreposicao, tolerancia_realizacao_min
         ) VALUES (
           ${b.nome}, ${b.categoria}::grupo3.categoria_atendimento, ${b.descricao ?? null}, ${b.duracaoPadraoMin},
-          ${b.exigeMotivoCancelamento}, ${b.exigeMotivoReagendamento}, ${b.permiteSobreposicao}
+          ${b.exigeMotivoCancelamento}, ${b.exigeMotivoReagendamento}, ${b.permiteSobreposicao}, ${b.toleranciaRealizacaoMin}
         ) RETURNING id
       `;
       await audit(tx, {
@@ -130,7 +133,8 @@ router.put(
           duracao_padrao_min = ${b.duracaoPadraoMin},
           exige_motivo_cancelamento = ${b.exigeMotivoCancelamento},
           exige_motivo_reagendamento = ${b.exigeMotivoReagendamento},
-          permite_sobreposicao = ${b.permiteSobreposicao}
+          permite_sobreposicao = ${b.permiteSobreposicao},
+          tolerancia_realizacao_min = ${b.toleranciaRealizacaoMin}
         WHERE id = ${atual.id}::uuid
       `;
       await audit(tx, {

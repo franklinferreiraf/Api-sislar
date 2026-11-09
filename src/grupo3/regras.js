@@ -62,6 +62,11 @@ export function podeTransitar(de, para) {
   return de === "agendado" && ["realizado", "nao_realizado", "cancelado"].includes(para);
 }
 
+// A realização pode ser registrada a partir de `toleranciaMin` minutos antes do início.
+export function podeRegistrarRealizacao(inicio, toleranciaMin, agora = new Date()) {
+  return ms(agora) >= ms(inicio) - toleranciaMin * 60_000;
+}
+
 export function exigeMotivo(tipo, acao) {
   if (acao === "cancelar") return tipo.exigeMotivoCancelamento === true;
   if (acao === "reagendar") return tipo.exigeMotivoReagendamento === true;

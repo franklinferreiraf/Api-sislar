@@ -82,6 +82,8 @@ CREATE TABLE tipo_atendimento (
   exige_motivo_cancelamento boolean NOT NULL DEFAULT true,
   exige_motivo_reagendamento boolean NOT NULL DEFAULT true,
   permite_sobreposicao boolean NOT NULL DEFAULT false,
+  -- Quantos minutos antes do início a realização já pode ser registrada.
+  tolerancia_realizacao_min integer NOT NULL DEFAULT 60 CHECK (tolerancia_realizacao_min BETWEEN 0 AND 1440),
   ativo boolean NOT NULL DEFAULT true,
   criado_em timestamptz NOT NULL DEFAULT now(),
   atualizado_em timestamptz NOT NULL DEFAULT now()
@@ -109,21 +111,36 @@ CREATE TABLE agendamento (
   responsavel_realizacao_id uuid REFERENCES colaborador(id),
   observacao_realizacao text CHECK (observacao_realizacao IS NULL OR char_length(observacao_realizacao) <= 2000),
   concluido_em timestamptz,
+  -- Usuário que registrou a realização ou o cancelamento (o responsável pode ser outra pessoa).
+  registrado_por_ref uuid,
   criado_por_ref uuid NOT NULL,
   criado_em timestamptz NOT NULL DEFAULT now(),
   atualizado_em timestamptz NOT NULL DEFAULT now(),
   CHECK (fim > inicio),
   CHECK ((status = 'agendado') = (concluido_em IS NULL)),
+  CHECK ((status = 'agendado') = (registrado_por_ref IS NULL)),
   CHECK (status NOT IN ('realizado','nao_realizado') OR responsavel_realizacao_id IS NOT NULL)
 );
 CREATE INDEX indice_agendamento_profissional_ativo ON agendamento (profissional_id, inicio) WHERE status = 'agendado';
 CREATE INDEX indice_agendamento_idoso ON agendamento (idoso_ref, inicio DESC);
 CREATE INDEX indice_agendamento_inicio ON agendamento (inicio);
 
+-- Encerrado é imutável. Única exceção: a correção de realização (POST .../corrigir-realizacao), que liga
+-- grupo3.correcao_realizacao na transação e só pode trocar status (entre realizado e não realizado),
+-- responsável e observação da realização.
 CREATE FUNCTION preparar_agendamento() RETURNS trigger LANGUAGE plpgsql SET search_path = grupo3, pg_catalog AS $$
 BEGIN
   IF TG_OP = 'UPDATE' AND OLD.status <> 'agendado' THEN
-    RAISE EXCEPTION 'Agendamento encerrado não pode ser alterado.';
+    IF coalesce(current_setting('grupo3.correcao_realizacao', true), '') <> 'on'
+       OR OLD.status NOT IN ('realizado','nao_realizado')
+       OR NEW.status NOT IN ('realizado','nao_realizado')
+       OR (NEW.idoso_ref, NEW.tipo_id, NEW.profissional_id, NEW.inicio, NEW.duracao_min, NEW.local, NEW.observacoes,
+           NEW.motivo_status, NEW.concluido_em, NEW.registrado_por_ref, NEW.criado_por_ref, NEW.criado_em)
+          IS DISTINCT FROM
+          (OLD.idoso_ref, OLD.tipo_id, OLD.profissional_id, OLD.inicio, OLD.duracao_min, OLD.local, OLD.observacoes,
+           OLD.motivo_status, OLD.concluido_em, OLD.registrado_por_ref, OLD.criado_por_ref, OLD.criado_em) THEN
+      RAISE EXCEPTION 'Agendamento encerrado não pode ser alterado.';
+    END IF;
   END IF;
   NEW.fim := NEW.inicio + make_interval(mins => NEW.duracao_min);
   NEW.atualizado_em := now();
@@ -138,7 +155,7 @@ CREATE TRIGGER impedir_exclusao_agendamento BEFORE DELETE ON agendamento
 CREATE TABLE historico_agendamento (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   agendamento_id uuid NOT NULL REFERENCES agendamento(id),
-  acao text NOT NULL CHECK (acao IN ('criado','reagendado','cancelado','realizado','nao_realizado')),
+  acao text NOT NULL CHECK (acao IN ('criado','reagendado','cancelado','realizado','nao_realizado','corrigido')),
   anterior jsonb,
   novo jsonb,
   motivo text CHECK (motivo IS NULL OR char_length(motivo) <= 1000),

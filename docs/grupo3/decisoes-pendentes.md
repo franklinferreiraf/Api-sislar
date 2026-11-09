@@ -23,6 +23,7 @@ Cada linha registra o que foi assumido e onde está no código, para trocar sem 
 | Exceção à regra de conflito | Desligada | `grupo3.tipo_atendimento.permite_sobreposicao`. Só vale entre agendamentos do **mesmo tipo**; tipos diferentes sempre conflitam |
 | Fuso da instituição | `America/Sao_Paulo` | `grupo3.configuracao`, chave `fuso_horario` |
 | **Ciclo do acompanhamento odontológico** | `semestre_civil` (jan–jun / jul–dez) | Fatia 4: `grupo3.configuracao`, chave `odontologia.ciclo` = `{ "modo": "semestre_civil" \| "dias_corridos", "dias": 180 }`. `GET /api/odontologia/pendencias?ciclo=AAAA-S` (ex.: `2026-2`) no modo semestre civil; em `dias_corridos`, o ciclo é contado da data de referência para trás |
+| Tolerância para registrar a realização | 60 min antes do início | `grupo3.tipo_atendimento.tolerancia_realizacao_min`, por tipo (0 a 1440) |
 | Antecedência dos lembretes | 24 h | Fatia 2: `grupo3.configuracao` (padrão) e por tipo de atendimento |
 | Cobertura mínima da escala | Sem cobertura cadastrada | Fatia 3: tabela `grupo3.cobertura_necessaria` |
 
@@ -33,8 +34,9 @@ Cada linha registra o que foi assumido e onde está no código, para trocar sem 
 | Idoso ativo | `public.patients` não tem status de inativação; todo idoso cadastrado é tratado como ativo. | `src/grupo3/portas/idosos.js` — `TODO(integracao-G1)` |
 | Visibilidade do prontuário (US-031) | Ainda não existe. O G3 exige a permissão clínica do módulo e consulta `podeVerIdoso()`, que hoje libera. | `src/grupo3/portas/prontuario.js` — `TODO(integracao-G1)` |
 | LGPD na agenda | Categorias clínicas: `consulta_medica`, `consulta_odontologica`, `avaliacao` (exigem `atendimento-clinico.visualizar`) e `fisioterapia` (exige `fisioterapia.visualizar`). Sem a permissão, o texto livre volta `null`. | `PERMISSAO_CLINICA` em `src/grupo3/regras.js` |
-| Realização antes do horário | Recusada (422): realizado e não realizado só depois do início. Desmarcar antes do horário é cancelamento. | `POST /agendamentos/{id}/realizacao` |
-| Responsável pela realização | Se não for informado: o colaborador do usuário logado; sem vínculo, o profissional do agendamento. O usuário que registrou fica na auditoria e no histórico. | `POST /agendamentos/{id}/realizacao` |
+| Realização antes do horário | Aceita a partir da tolerância do tipo (padrão 60 min antes do início); fora dela, 422. | `podeRegistrarRealizacao()` em `src/grupo3/regras.js` |
+| Responsável pela realização | Se não for informado, é o profissional do agendamento. O usuário que registrou fica em `registrado_por_ref`, no histórico e na auditoria. | `POST /agendamentos/{id}/realizacao` |
+| Correção de realização | Só `agenda.administrar`, com motivo obrigatório; vale para realizado e não realizado. O banco libera a alteração por um ajuste de sessão (`grupo3.correcao_realizacao`) restrito aos campos da realização. | `POST /agendamentos/{id}/corrigir-realizacao`; gatilho `preparar_agendamento` |
 | Lembrete sem destinatário | Colaborador sem `usuario_ref` gera lembrete com status `sem_destinatario`, visível em `GET /agendamentos/{id}/lembretes`, em vez de falha silenciosa. | Fatia 2 |
 | Formato de erro | Mantido o do repositório, `{ error: { message, details } }`, e não ProblemDetails. | `src/middleware/error.js` |
 | Base dos paths | `/api`, sem `/v1`, como o resto da API. | `src/routes/grupo3/index.js` |

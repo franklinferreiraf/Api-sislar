@@ -71,6 +71,7 @@ const exemploTipo = {
   exigeMotivoCancelamento: true,
   exigeMotivoReagendamento: false,
   permiteSobreposicao: true,
+  toleranciaRealizacaoMin: 60,
   ativo: true,
   criadoEm: "2026-11-09T12:00:00.000Z",
   atualizadoEm: "2026-11-09T12:00:00.000Z",
@@ -100,6 +101,7 @@ const exemploAgendamento = {
   motivoStatus: null,
   responsavelRealizacao: null,
   observacaoRealizacao: null,
+  registradoPor: null,
   concluidoEm: null,
   criadoEm: "2026-11-09T12:00:00.000Z",
   atualizadoEm: "2026-11-09T12:00:00.000Z",
@@ -133,6 +135,10 @@ const corpoTipo = {
       type: "boolean",
       default: false,
       description: "Permite sobrepor apenas agendamentos do MESMO tipo (ex.: atendimento em grupo).",
+    },
+    toleranciaRealizacaoMin: {
+      type: "integer", minimum: 0, maximum: 1440, default: 60,
+      description: "Minutos antes do início a partir dos quais a realização pode ser registrada.",
     },
   },
 };
@@ -338,7 +344,7 @@ export const pathsGrupo3 = {
         required: ["status"],
         properties: {
           status: { type: "string", enum: ["realizado", "nao_realizado"] },
-          responsavelId: { ...uuid, description: "Padrão: colaborador do usuário logado; sem vínculo, o profissional do agendamento." },
+          responsavelId: { ...uuid, description: "Padrão: o profissional do agendamento. Quem registrou fica em `registradoPor`." },
           observacao: { type: "string", maxLength: 2000, nullable: true },
         },
       },
@@ -346,9 +352,29 @@ export const pathsGrupo3 = {
       errors: [404, 409],
       example: {
         ...exemploAgendamento, status: "realizado", responsavelRealizacao: { id: exemploColaborador.id, nome: "Renata Gouveia" },
-        observacaoRealizacao: "Caminhada de 15 minutos sem dor.", concluidoEm: "2026-11-10T17:45:00.000Z",
+        observacaoRealizacao: "Caminhada de 15 minutos sem dor.", registradoPor: { id: "s03", nome: "Carla Beatriz Nunes" },
+        concluidoEm: "2026-11-10T17:45:00.000Z",
       },
-      description: "Só depois do horário de início e uma única vez (422 antes do início, 409 se já encerrado).",
+      description: "Aceita a partir de `toleranciaRealizacaoMin` minutos antes do início (padrão 60; 422 antes disso) e uma única vez (409 se já encerrado). Para corrigir, use `corrigir-realizacao`.",
+    }),
+  },
+  "/api/agendamentos/{id}/corrigir-realizacao": {
+    post: op("G3 · Agenda", "Corrigir realização registrada", "agenda.administrar", {
+      params: [path("id")],
+      body: {
+        type: "object",
+        required: ["motivo"],
+        properties: {
+          motivo: { type: "string", minLength: 3, maxLength: 1000 },
+          status: { type: "string", enum: ["realizado", "nao_realizado"] },
+          responsavelId: uuid,
+          observacao: { type: "string", maxLength: 2000, nullable: true },
+        },
+      },
+      bodyExample: { status: "nao_realizado", observacao: "Idoso dormia", motivo: "Lançado como realizado por engano" },
+      errors: [404, 409],
+      example: { ...exemploAgendamento, status: "nao_realizado", observacaoRealizacao: "Idoso dormia", registradoPor: { id: "s03", nome: "Carla Beatriz Nunes" }, concluidoEm: "2026-11-10T17:45:00.000Z" },
+      description: "Só para agendamento realizado ou não realizado (409 caso contrário). Troca status, responsável e observação da realização; grava `corrigido` no histórico com anterior → novo e motivo. Qualquer outra alteração de agendamento encerrado continua bloqueada pelo banco. 422 sem motivo ou sem mudança real.",
     }),
   },
   "/api/agendamentos/{id}/historico": {

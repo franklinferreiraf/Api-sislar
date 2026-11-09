@@ -81,11 +81,12 @@ export async function seedGrupo3(tx) {
     const rows = await tx.$queryRaw`
       INSERT INTO grupo3.agendamento (
         idoso_ref, tipo_id, profissional_id, inicio, duracao_min, observacoes, status,
-        responsavel_realizacao_id, concluido_em, criado_por_ref
+        responsavel_realizacao_id, concluido_em, registrado_por_ref, criado_por_ref
       ) VALUES (
         ${idosoRef}::uuid, ${tipos[tipo].id}::uuid, ${colaboradores[colaborador]}::uuid, ${inicio}, ${tipos[tipo].duracao},
         ${observacoes}, ${status}::grupo3.status_agendamento,
-        ${encerrado ? colaboradores[colaborador] : null}::uuid, ${encerrado ? inicio : null}, ${autor}::uuid
+        ${encerrado ? colaboradores[colaborador] : null}::uuid, ${encerrado ? inicio : null},
+        ${encerrado ? autor : null}::uuid, ${autor}::uuid
       ) RETURNING id
     `;
     await tx.$executeRaw`
