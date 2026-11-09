@@ -108,3 +108,49 @@ export function mascararHistorico(item, categoria, usuario, ehProfissional = fal
   };
   return { ...item, anterior: limpar(item.anterior), novo: limpar(item.novo), motivo: null, conteudoRestrito: true };
 }
+
+// ---------- Lembretes (US-074) ----------
+
+export const STATUS_LEMBRETE = ["pendente", "enviado", "entregue", "falha", "sem_destinatario", "cancelado"];
+
+/**
+ * Horários de envio dos lembretes de um agendamento. Atendimento já iniciado não gera lembrete.
+ * Antecedências que já passaram viram um único envio imediato (o de menor antecedência), para não
+ * disparar vários avisos atrasados de uma vez.
+ */
+export function calcularEnvios(inicio, antecedencias, agora = new Date()) {
+  const inicioMs = ms(inicio);
+  const agoraMs = ms(agora);
+  if (inicioMs <= agoraMs) return [];
+  const unicas = [...new Set(antecedencias)].sort((a, b) => b - a);
+  const futuros = [];
+  let atrasada = null;
+  for (const antecedenciaMin of unicas) {
+    const enviarMs = inicioMs - antecedenciaMin * 60_000;
+    if (enviarMs > agoraMs) futuros.push({ antecedenciaMin, enviarEm: new Date(enviarMs) });
+    else if (atrasada === null || antecedenciaMin < atrasada) atrasada = antecedenciaMin;
+  }
+  if (atrasada !== null) futuros.push({ antecedenciaMin: atrasada, enviarEm: new Date(agoraMs) });
+  return futuros;
+}
+
+export function statusInicialLembrete(usuarioRef) {
+  return usuarioRef ? "pendente" : "sem_destinatario";
+}
+
+// Depois de uma falha: volta para a fila até esgotar as tentativas.
+export function statusAposFalha(tentativas, maxTentativas) {
+  return tentativas >= maxTentativas ? "falha" : "pendente";
+}
+
+// ---------- Janela de atendimento (US-070) ----------
+
+export function minutosDoDia(hhmm) {
+  const [h, m] = hhmm.split(":").map(Number);
+  return h * 60 + m;
+}
+
+export function janelaValida(inicio, fim) {
+  if (!inicio || !fim) return true;
+  return minutosDoDia(fim) > minutosDoDia(inicio);
+}

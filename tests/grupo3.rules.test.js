@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  calcularEnvios,
   calcularFim,
+  janelaValida,
   emConflito,
   exigeMotivo,
   filtrarConflitos,
@@ -12,6 +14,8 @@ import {
   podeRegistrarRealizacao,
   podeTransitar,
   sobrepoe,
+  statusAposFalha,
+  statusInicialLembrete,
 } from "../src/grupo3/regras.js";
 
 const P = "prof-1";
@@ -131,5 +135,48 @@ describe("grupo3 · LGPD na agenda", () => {
     assert.equal(visto.novo.observacaoRealizacao, undefined);
     assert.equal(visto.novo.status, "realizado");
     assert.equal(visto.motivo, null);
+  });
+});
+
+describe("grupo3 · lembretes (US-074)", () => {
+  const inicio = new Date("2030-03-12T13:00:00Z");
+
+  it("agenda cada antecedência antes do início", () => {
+    const envios = calcularEnvios(inicio, [60, 1440], new Date("2030-03-10T12:00:00Z"));
+    assert.deepEqual(envios.map((e) => [e.antecedenciaMin, e.enviarEm.toISOString()]), [
+      [1440, "2030-03-11T13:00:00.000Z"],
+      [60, "2030-03-12T12:00:00.000Z"],
+    ]);
+  });
+
+  it("antecedências vencidas viram um único envio imediato", () => {
+    const agora = new Date("2030-03-12T12:30:00Z");
+    const envios = calcularEnvios(inicio, [1440, 60, 120], agora);
+    assert.equal(envios.length, 1);
+    assert.equal(envios[0].antecedenciaMin, 60);
+    assert.equal(envios[0].enviarEm.toISOString(), agora.toISOString());
+  });
+
+  it("atendimento já iniciado ou sem antecedência não gera lembrete", () => {
+    assert.deepEqual(calcularEnvios(inicio, [1440], inicio), []);
+    assert.deepEqual(calcularEnvios(inicio, [], new Date("2030-03-01T00:00:00Z")), []);
+  });
+
+  it("sem usuário vinculado o lembrete nasce sem destinatário", () => {
+    assert.equal(statusInicialLembrete(null), "sem_destinatario");
+    assert.equal(statusInicialLembrete("a2f1c7e0-0000-4000-8000-000000000000"), "pendente");
+  });
+
+  it("falha volta para a fila até esgotar as tentativas", () => {
+    assert.equal(statusAposFalha(1, 3), "pendente");
+    assert.equal(statusAposFalha(3, 3), "falha");
+  });
+});
+
+describe("grupo3 · janela de atendimento (US-070)", () => {
+  it("fim da janela precisa ser depois do início", () => {
+    assert.equal(janelaValida("08:00", "10:00"), true);
+    assert.equal(janelaValida("10:00", "10:00"), false);
+    assert.equal(janelaValida("10:00", undefined), true);
   });
 });

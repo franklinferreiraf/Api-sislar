@@ -13,6 +13,7 @@ export const dataHora = z.string()
   .datetime({ offset: true, message: "Use data e hora ISO 8601 com fuso (ex.: 2026-11-10T14:00:00-03:00)." })
   .transform((value) => new Date(value));
 
+export const horario = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use o horário no formato HH:MM.");
 export const categoria = z.enum(CATEGORIAS);
 export const statusAgendamento = z.enum(STATUS_AGENDAMENTO);
 export const duracaoMin = z.number().int().min(5, "Duração mínima de 5 minutos.").max(720, "Duração máxima de 12 horas.");

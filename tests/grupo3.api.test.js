@@ -3,6 +3,7 @@ import { after, before, describe, it } from "node:test";
 import request from "supertest";
 import { app } from "../src/app.js";
 import { prisma } from "../src/db/prisma.js";
+import { processarLembretes } from "../src/grupo3/lembretes.js";
 import { prepare, shutdown } from "./prepare.js";
 
 const password = "Sislar@2026";
@@ -72,6 +73,9 @@ describe("grupo3 · documentação", () => {
     assert.equal(spec.paths["/api/agenda"].post.deprecated, true);
     assert.equal(spec.paths["/api/atendimentos"].post.deprecated, true);
     assert.equal(spec.paths["/api/funcionarios"].get.deprecated, true);
+    for (const rota of ["/api/agendas/farmacia", "/api/agendas/cuidados-pessoais", "/api/idosos/{idosoId}/cuidados-pessoais", "/api/agendamentos/{id}/lembretes"]) {
+      assert.ok(spec.paths[rota]?.get, rota);
+    }
   });
 });
 
@@ -319,5 +323,184 @@ describe("grupo3 · permissões e LGPD (NFR-014)", () => {
     assert.equal((await post("recepcao", "/api/colaboradores", { nome: "Fulano", vinculo: "voluntario" })).status, 403);
     const duplicado = await post("gestor", "/api/colaboradores", { nome: "Outra Renata", vinculo: "funcionario", usuarioId: "s06" });
     assert.equal(duplicado.status, 409);
+  });
+});
+
+// ---------------- Fatia 2 ----------------
+
+async function tipoPorNome(nome) {
+  const lista = await get("admin", "/api/tipos-atendimento?limit=100");
+  return lista.body.data.find((tipo) => tipo.nome === nome).id;
+}
+
+async function colaboradorPorNome(nome) {
+  const lista = await get("admin", `/api/colaboradores?q=${encodeURIComponent(nome)}`);
+  return lista.body.data.find((item) => item.nome === nome).id;
+}
+
+const lembretes = async (perfil, id) => (await get(perfil, `/api/agendamentos/${id}/lembretes`)).body.data;
+
+describe("grupo3 · agenda da farmácia (US-070)", () => {
+  let farmaceutico;
+  let farmacia;
+
+  before(async () => {
+    farmaceutico = (await post("gestor", "/api/colaboradores", { nome: "Farmacêutica de teste", vinculo: "funcionario" })).body.id;
+    farmacia = await tipoPorNome("Atendimento da farmácia");
+    const corte = await tipoPorNome("Corte de cabelo");
+    for (const [hora, tipoId, idosoId] of [["08:30", farmacia, "p01"], ["14:00", farmacia, "p02"], ["09:00", corte, "p03"]]) {
+      const criado = await post("recepcao", "/api/agendamentos", { idosoId, tipoId, profissionalId: farmaceutico, inicio: `2030-04-02T${hora}:00-03:00` });
+      assert.equal(criado.status, 201);
+    }
+  });
+
+  it("filtra por janela de atendimento no fuso da instituição", async () => {
+    const dia = await get("tecnico", `/api/agendas/farmacia?visao=dia&data=2030-04-02&profissionalId=${farmaceutico}`);
+    assert.equal(dia.status, 200);
+    assert.equal(dia.body.data.length, 2);
+    assert.ok(dia.body.data.every((item) => item.tipo.categoria === "farmacia"));
+    assert.equal(dia.body.porProfissional[0].total, 2);
+    const manha = await get("tecnico", `/api/agendas/farmacia?visao=dia&data=2030-04-02&profissionalId=${farmaceutico}&janelaInicio=08:00&janelaFim=10:00`);
+    assert.equal(manha.body.data.length, 1);
+    assert.deepEqual(manha.body.janela, { inicio: "08:00", fim: "10:00" });
+    const lista = await get("tecnico", `/api/agendamentos?categoria=farmacia&profissionalId=${farmaceutico}&janelaInicio=13:00`);
+    assert.equal(lista.body.data.length, 1);
+  });
+
+  it("filtra por responsável e recusa janela invertida", async () => {
+    const outro = await get("tecnico", `/api/agendas/farmacia?visao=dia&data=2030-04-02&profissionalId=${profissional}`);
+    assert.equal(outro.body.data.length, 0);
+    assert.equal((await get("tecnico", "/api/agendas/farmacia?janelaInicio=10:00&janelaFim=09:00")).status, 422);
+    assert.equal((await get("tecnico", "/api/agendas/farmacia?janelaInicio=25:00")).status, 422);
+    assert.equal((await get("voluntaria", "/api/agendas/farmacia")).status, 403);
+  });
+});
+
+describe("grupo3 · cuidados pessoais (US-071)", () => {
+  it("mostra agenda própria e histórico de realização por serviço", async () => {
+    const corte = await tipoPorNome("Corte de cabelo");
+    const barba = await tipoPorNome("Barba");
+    const cabeleireiro = await colaboradorPorNome("Jorge Matias (cabeleireiro)");
+    const feito = await post("recepcao", "/api/agendamentos", { idosoId: "p04", tipoId: corte, profissionalId: cabeleireiro, inicio: "2025-05-05T10:00:00-03:00" });
+    await post("recepcao", `/api/agendamentos/${feito.body.id}/realizacao`, { status: "realizado" });
+    const barbaFeita = await post("recepcao", "/api/agendamentos", { idosoId: "p04", tipoId: barba, profissionalId: cabeleireiro, inicio: "2025-05-05T11:00:00-03:00" });
+    await post("recepcao", `/api/agendamentos/${barbaFeita.body.id}/realizacao`, { status: "realizado" });
+
+    const historico = await get("recepcao", "/api/idosos/p04/cuidados-pessoais");
+    assert.equal(historico.status, 200);
+    const porTipo = Object.fromEntries(historico.body.data.map((item) => [item.tipo.nome, item]));
+    assert.equal(porTipo["Corte de cabelo"].totalRealizados, 1);
+    assert.equal(porTipo["Corte de cabelo"].ultimaRealizacao.responsavel.nome, "Jorge Matias (cabeleireiro)");
+    assert.ok(porTipo["Corte de cabelo"].proximoAgendamento);
+    assert.equal(porTipo.Barba.proximoAgendamento, null);
+
+    const agenda = await get("recepcao", "/api/agendas/cuidados-pessoais?visao=mes&data=2025-05-05");
+    assert.equal(agenda.status, 200);
+    assert.ok(agenda.body.data.length >= 2);
+    assert.ok(agenda.body.data.every((item) => item.tipo.categoria === "cuidado_pessoal"));
+    assert.equal((await get("recepcao", "/api/idosos/nao-existe/cuidados-pessoais")).status, 404);
+  });
+});
+
+describe("grupo3 · lembretes (US-074)", () => {
+  let renata;
+
+  before(async () => {
+    renata = await colaboradorPorNome("Renata Gouveia");
+  });
+
+  it("agenda lembrete 24 h antes para colaborador com usuário", async () => {
+    const criado = await agendar("recepcao", { profissionalId: renata, inicio: "2030-04-05T10:00:00-03:00" });
+    const lista = await lembretes("recepcao", criado.body.id);
+    assert.equal(lista.length, 1);
+    assert.equal(lista[0].status, "pendente");
+    assert.equal(lista[0].antecedenciaMin, 1440);
+    assert.equal(new Date(lista[0].enviarEm).toISOString(), "2030-04-04T13:00:00.000Z");
+    assert.equal(lista[0].destinatario.usuarioId, "s06");
+  });
+
+  it("colaborador sem usuário gera lembrete sem_destinatario, visível na API", async () => {
+    const criado = await agendar("recepcao", { inicio: "2030-04-06T10:00:00-03:00" });
+    const lista = await lembretes("recepcao", criado.body.id);
+    assert.equal(lista.length, 1);
+    assert.equal(lista[0].status, "sem_destinatario");
+    assert.match(lista[0].ultimoErro, /sem usuário/);
+  });
+
+  it("vincular usuário depois devolve o lembrete para a fila", async () => {
+    const semUsuario = (await post("gestor", "/api/colaboradores", { nome: "Psicóloga de teste", vinculo: "externo" })).body.id;
+    const criado = await agendar("recepcao", { profissionalId: semUsuario, inicio: "2030-04-07T10:00:00-03:00" });
+    assert.equal((await lembretes("recepcao", criado.body.id))[0].status, "sem_destinatario");
+    const vinculo = await request(app).put(`/api/colaboradores/${semUsuario}`).set(await como("gestor"))
+      .send({ nome: "Psicóloga de teste", vinculo: "externo", usuarioId: "s16" });
+    assert.equal(vinculo.status, 200);
+    const lista = await lembretes("recepcao", criado.body.id);
+    assert.equal(lista[0].status, "pendente");
+    assert.equal(lista[0].destinatario.usuarioId, "s16");
+  });
+
+  it("antecedências configuradas por tipo; lista vazia desliga", async () => {
+    const dois = await post("admin", "/api/tipos-atendimento", {
+      nome: "Teste dois lembretes", categoria: "outro", duracaoPadraoMin: 30, antecedenciasLembreteMin: [60, 1440, 60],
+    });
+    assert.deepEqual(dois.body.antecedenciasLembreteMin, [1440, 60]);
+    const nenhum = await post("admin", "/api/tipos-atendimento", {
+      nome: "Teste sem lembrete", categoria: "outro", duracaoPadraoMin: 30, antecedenciasLembreteMin: [],
+    });
+    const a = await agendar("recepcao", { tipoId: dois.body.id, profissionalId: renata, inicio: "2030-04-08T10:00:00-03:00" });
+    const b = await agendar("recepcao", { tipoId: nenhum.body.id, profissionalId: renata, inicio: "2030-04-08T14:00:00-03:00" });
+    assert.equal((await lembretes("recepcao", a.body.id)).length, 2);
+    assert.equal((await lembretes("recepcao", b.body.id)).length, 0);
+    assert.equal((await post("admin", "/api/tipos-atendimento", { nome: "Teste inválido", categoria: "outro", duracaoPadraoMin: 30, antecedenciasLembreteMin: [1] })).status, 422);
+  });
+
+  it("reagendar cancela o lembrete antigo e cria outro; cancelar encerra a fila", async () => {
+    const criado = await agendar("recepcao", { profissionalId: renata, inicio: "2030-04-09T10:00:00-03:00" });
+    await post("recepcao", `/api/agendamentos/${criado.body.id}/reagendar`, { inicio: "2030-04-10T10:00:00-03:00", motivo: "Troca de dia" });
+    const depois = await lembretes("recepcao", criado.body.id);
+    assert.deepEqual(depois.map((item) => item.status).sort(), ["cancelado", "pendente"]);
+    assert.equal(new Date(depois.find((item) => item.status === "pendente").enviarEm).toISOString(), "2030-04-09T13:00:00.000Z");
+    await post("recepcao", `/api/agendamentos/${criado.body.id}/cancelar`, { motivo: "Família levou ao médico" });
+    assert.ok((await lembretes("recepcao", criado.body.id)).every((item) => item.status === "cancelado"));
+  });
+
+  it("job entrega na caixa de notificações e não reenvia", async () => {
+    const proximo = await agendar("recepcao", { profissionalId: renata, inicio: new Date(Date.now() + 45 * 60_000).toISOString(), local: "Sala 3" });
+    const [pendente] = await lembretes("recepcao", proximo.body.id);
+    assert.equal(pendente.status, "pendente");
+    const resumo = await processarLembretes();
+    assert.ok(resumo.entregues >= 1);
+    const [entregue] = await lembretes("recepcao", proximo.body.id);
+    assert.equal(entregue.status, "entregue");
+    assert.equal(entregue.canal, "interno");
+    assert.ok(entregue.entregueEm);
+    const caixa = await get("fisio", "/api/notificacoes");
+    const aviso = caixa.body.data.find((item) => item.kind === "agenda" && item.link === `/agenda/agendamentos/${proximo.body.id}`);
+    assert.ok(aviso);
+    assert.match(aviso.body, /Sala 3/);
+    const segunda = await processarLembretes();
+    assert.equal(segunda.processados, 0);
+  });
+
+  it("falha no envio tenta de novo e marca falha ao esgotar as tentativas", async () => {
+    const proximo = await agendar("recepcao", { profissionalId: renata, inicio: new Date(Date.now() + 100 * 60_000).toISOString() });
+    assert.equal(proximo.status, 201);
+    const quebrado = async () => { throw new Error("canal indisponível"); };
+    await processarLembretes({ enviar: quebrado });
+    let [item] = await lembretes("recepcao", proximo.body.id);
+    assert.equal(item.status, "pendente");
+    assert.equal(item.tentativas, 1);
+    await processarLembretes({ enviar: quebrado });
+    await processarLembretes({ enviar: quebrado });
+    [item] = await lembretes("recepcao", proximo.body.id);
+    assert.equal(item.status, "falha");
+    assert.equal(item.tentativas, 3);
+    assert.equal(item.ultimoErro, "canal indisponível");
+  });
+
+  it("lembretes seguem a mesma permissão do agendamento", async () => {
+    const criado = await agendar("recepcao", { profissionalId: renata, inicio: "2030-04-11T10:00:00-03:00" });
+    assert.equal((await get("voluntaria", `/api/agendamentos/${criado.body.id}/lembretes`)).status, 403);
+    assert.equal((await get("fisio", `/api/agendamentos/${criado.body.id}/lembretes`)).status, 200);
   });
 });

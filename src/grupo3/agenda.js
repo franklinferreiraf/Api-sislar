@@ -58,7 +58,9 @@ function paraAgendamento(row, idosos) {
   };
 }
 
-export function filtrosAgendamento({ inicio, fim, profissionalId, idosoRef, tipoId, categoria, status }) {
+export function filtrosAgendamento({
+  inicio, fim, profissionalId, idosoRef, tipoId, categoria, status, responsavelRealizacaoId, janelaInicio, janelaFim,
+}) {
   const conds = [];
   if (inicio) conds.push(Prisma.sql`a.fim > ${inicio}`);
   if (fim) conds.push(Prisma.sql`a.inicio < ${fim}`);
@@ -67,6 +69,10 @@ export function filtrosAgendamento({ inicio, fim, profissionalId, idosoRef, tipo
   if (tipoId) conds.push(Prisma.sql`a.tipo_id = ${tipoId}::uuid`);
   if (categoria) conds.push(Prisma.sql`t.categoria = ${categoria}::grupo3.categoria_atendimento`);
   if (status) conds.push(Prisma.sql`a.status = ${status}::grupo3.status_agendamento`);
+  if (responsavelRealizacaoId) conds.push(Prisma.sql`a.responsavel_realizacao_id = ${responsavelRealizacaoId}::uuid`);
+  // Janela de atendimento: hora de início, no fuso da instituição, dentro de [janelaInicio, janelaFim).
+  if (janelaInicio) conds.push(Prisma.sql`(a.inicio AT TIME ZONE grupo3.fuso_horario())::time >= ${janelaInicio}::time`);
+  if (janelaFim) conds.push(Prisma.sql`(a.inicio AT TIME ZONE grupo3.fuso_horario())::time < ${janelaFim}::time`);
   return conds.length ? Prisma.sql`WHERE ${Prisma.join(conds, " AND ")}` : Prisma.empty;
 }
 

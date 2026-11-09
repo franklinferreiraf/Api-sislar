@@ -1,4 +1,5 @@
 // Dados de demonstração do Grupo 3 (agenda única, tipos de atendimento e equipe mínima).
+import { gerarLembretes } from "../grupo3/lembretes.js";
 
 const TIPOS = [
   // [nome, categoria, duração, exige motivo cancelar, exige motivo reagendar, permite sobreposição]
@@ -93,5 +94,6 @@ export async function seedGrupo3(tx) {
       INSERT INTO grupo3.historico_agendamento (agendamento_id, acao, novo, autor_ref)
       VALUES (${rows[0].id}::uuid, 'criado', ${JSON.stringify({ status: "agendado" })}::jsonb, ${autor}::uuid)
     `;
+    if (!encerrado) await gerarLembretes(tx, rows[0].id);
   }
 }

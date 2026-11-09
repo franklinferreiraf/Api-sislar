@@ -22,16 +22,18 @@ import {
   travarAgendamento,
   travarProfissional,
 } from "../../grupo3/agenda.js";
+import { cancelarLembretes, gerarLembretes, listarLembretes } from "../../grupo3/lembretes.js";
 import { buscarIdoso } from "../../grupo3/portas/idosos.js";
 import { podeVerIdoso } from "../../grupo3/portas/prontuario.js";
 import {
-  calcularFim, exigeMotivo, mascarar, mascararHistorico, motivoValido, podeAlterar, podeRegistrarRealizacao,
+  calcularFim, exigeMotivo, janelaValida, mascarar, mascararHistorico, motivoValido, podeAlterar, podeRegistrarRealizacao,
 } from "../../grupo3/regras.js";
 import {
   categoria,
   dataHora,
   dia,
   duracaoMin,
+  horario,
   idParam,
   idosoId,
   motivo,
@@ -44,15 +46,24 @@ import {
 
 const router = Router();
 
-const filtrosQuery = pageSchema.extend({
+const janelaRefine = [
+  (q) => janelaValida(q.janelaInicio, q.janelaFim),
+  { message: "O fim da janela precisa ser depois do início.", path: ["janelaFim"] },
+];
+
+const filtrosBase = pageSchema.extend({
   inicio: dataHora.optional(),
   fim: dataHora.optional(),
   profissionalId: uuid.optional(),
+  responsavelRealizacaoId: uuid.optional(),
   idosoId: idosoId.optional(),
   tipoId: uuid.optional(),
   categoria: categoria.optional(),
   status: statusAgendamento.optional(),
+  janelaInicio: horario.optional(),
+  janelaFim: horario.optional(),
 });
+const filtrosQuery = filtrosBase.refine(...janelaRefine);
 
 const agendaQuery = z.object({
   visao: z.enum(["dia", "semana", "mes"]).default("semana"),
@@ -147,6 +158,16 @@ router.get(
   }),
 );
 
+// US-074 — status dos lembretes do agendamento.
+router.get(
+  "/agendamentos/:id/lembretes",
+  validate(idParam, "params"),
+  asyncHandler(async (req, res) => {
+    const { agendamento } = await acessarAgendamento(req, req.params.id);
+    res.json({ data: await listarLembretes(agendamento.id) });
+  }),
+);
+
 async function agendaDoColaborador(req, res, colaborador) {
   const { visao, data, status } = req.query;
   const periodo = await periodoAgenda(visao, data ?? null);
@@ -187,12 +208,102 @@ router.get(
   }),
 );
 
+// US-070 / US-071 — agenda específica de uma categoria (farmácia, cuidados pessoais) por período,
+// com filtro por responsável e janela de atendimento.
+const visaoCategoriaQuery = z.object({
+  visao: z.enum(["dia", "semana", "mes"]).default("semana"),
+  data: dia.optional(),
+  profissionalId: uuid.optional(),
+  responsavelRealizacaoId: uuid.optional(),
+  status: statusAgendamento.optional(),
+  janelaInicio: horario.optional(),
+  janelaFim: horario.optional(),
+}).refine(...janelaRefine);
+
+function agendaPorCategoria(categoriaFixa) {
+  return asyncHandler(async (req, res) => {
+    const { visao, data, ...filtros } = req.query;
+    const periodo = await periodoAgenda(visao, data ?? null);
+    const { data: itens } = await listarAgendamentos({ ...filtros, categoria: categoriaFixa, inicio: periodo.inicio, fim: periodo.fim });
+    const colaborador = await colaboradorDoUsuario(req.user);
+    const visiveis = mascararLista(itens, req.user, colaborador?.id);
+    const porProfissional = new Map();
+    for (const item of visiveis) {
+      const atual = porProfissional.get(item.profissional.id) ?? { ...item.profissional, total: 0 };
+      atual.total += 1;
+      porProfissional.set(item.profissional.id, atual);
+    }
+    res.json({
+      categoria: categoriaFixa,
+      periodo: { visao, data: periodo.data, inicio: periodo.inicio, fim: periodo.fim, fuso: periodo.fuso },
+      janela: filtros.janelaInicio || filtros.janelaFim ? { inicio: filtros.janelaInicio ?? null, fim: filtros.janelaFim ?? null } : null,
+      resumo: resumoAgenda(visiveis),
+      porProfissional: [...porProfissional.values()],
+      data: visiveis,
+    });
+  });
+}
+
+router.get("/agendas/farmacia", requirePerm("agenda.visualizar"), validate(visaoCategoriaQuery, "query"), agendaPorCategoria("farmacia"));
+router.get("/agendas/cuidados-pessoais", requirePerm("agenda.visualizar"), validate(visaoCategoriaQuery, "query"), agendaPorCategoria("cuidado_pessoal"));
+
+// US-071 — por serviço de cuidado pessoal: última realização, próximo agendamento e total realizado.
+router.get(
+  "/idosos/:idosoId/cuidados-pessoais",
+  requirePerm("agenda.visualizar"),
+  validate(z.object({ idosoId }), "params"),
+  asyncHandler(async (req, res) => {
+    const idoso = await buscarIdoso(req.params.idosoId);
+    if (!idoso) notFound("Idoso não encontrado.");
+    const rows = await prisma.$queryRaw`
+      SELECT t.id AS tipo_id, t.nome AS tipo_nome,
+             count(*) FILTER (WHERE a.status = 'realizado')::int AS total_realizados,
+             (SELECT row_to_json(x) FROM (
+                SELECT u.id, u.inicio, r.id AS responsavel_id, r.nome AS responsavel_nome
+                FROM grupo3.agendamento u LEFT JOIN grupo3.colaborador r ON r.id = u.responsavel_realizacao_id
+                WHERE u.idoso_ref = ${idoso.ref}::uuid AND u.tipo_id = t.id AND u.status = 'realizado'
+                ORDER BY u.inicio DESC LIMIT 1) x) AS ultima,
+             (SELECT row_to_json(y) FROM (
+                SELECT p.id, p.inicio, c.id AS profissional_id, c.nome AS profissional_nome
+                FROM grupo3.agendamento p JOIN grupo3.colaborador c ON c.id = p.profissional_id
+                WHERE p.idoso_ref = ${idoso.ref}::uuid AND p.tipo_id = t.id AND p.status = 'agendado' AND p.fim > now()
+                ORDER BY p.inicio LIMIT 1) y) AS proximo
+      FROM grupo3.agendamento a
+      JOIN grupo3.tipo_atendimento t ON t.id = a.tipo_id
+      WHERE a.idoso_ref = ${idoso.ref}::uuid AND t.categoria = 'cuidado_pessoal'
+      GROUP BY t.id, t.nome
+      ORDER BY t.nome
+    `;
+    res.json({
+      idoso: { id: idoso.id, nome: idoso.nome },
+      data: rows.map((row) => ({
+        tipo: { id: row.tipo_id, nome: row.tipo_nome },
+        totalRealizados: row.total_realizados,
+        ultimaRealizacao: row.ultima
+          ? {
+            agendamentoId: row.ultima.id,
+            inicio: row.ultima.inicio,
+            responsavel: row.ultima.responsavel_id ? { id: row.ultima.responsavel_id, nome: row.ultima.responsavel_nome } : null,
+          }
+          : null,
+        proximoAgendamento: row.proximo
+          ? {
+            agendamentoId: row.proximo.id,
+            inicio: row.proximo.inicio,
+            profissional: { id: row.proximo.profissional_id, nome: row.proximo.profissional_nome },
+          }
+          : null,
+      })),
+    });
+  }),
+);
+
 // US-072 — histórico de atendimentos do idoso.
 router.get(
   "/idosos/:idosoId/atendimentos",
   requirePerm("agenda.visualizar"),
   validate(z.object({ idosoId }), "params"),
-  validate(filtrosQuery.omit({ idosoId: true }), "query"),
+  validate(filtrosBase.omit({ idosoId: true }).refine(...janelaRefine), "query"),
   asyncHandler(async (req, res) => {
     const { page, limit, ...filtros } = req.query;
     validarIntervalo(filtros.inicio, filtros.fim);
@@ -279,6 +390,7 @@ router.post(
           RETURNING id
         `;
         const novoId = rows[0].id;
+        await gerarLembretes(tx, novoId);
         await registrarHistorico(tx, {
           agendamentoId: novoId, acao: "criado", autorRef: req.user.ref,
           novo: { inicio: b.inicio, duracaoMin: duracao, profissionalId: b.profissionalId, tipoId: tipo.id, status: "agendado" },
@@ -334,6 +446,8 @@ router.post(
           SET inicio = ${b.inicio}, duracao_min = ${duracao}, profissional_id = ${profissionalId}::uuid
           WHERE id = ${atual.id}::uuid
         `;
+        await cancelarLembretes(tx, atual.id);
+        await gerarLembretes(tx, atual.id);
         const anterior = { inicio: atual.inicio, duracaoMin: atual.duracao_min, profissionalId: atual.profissional_id };
         const novo = { inicio: b.inicio, duracaoMin: duracao, profissionalId };
         await registrarHistorico(tx, { agendamentoId: atual.id, acao: "reagendado", anterior, novo, motivo: b.motivo ?? null, autorRef: req.user.ref });
@@ -370,6 +484,7 @@ router.post(
             registrado_por_ref = ${req.user.ref}::uuid
         WHERE id = ${atual.id}::uuid
       `;
+      await cancelarLembretes(tx, atual.id);
       await registrarHistorico(tx, {
         agendamentoId: atual.id, acao: "cancelado", anterior: { status: "agendado" }, novo: { status: "cancelado" },
         motivo: req.body.motivo ?? null, autorRef: req.user.ref,
@@ -414,6 +529,7 @@ router.post(
             observacao_realizacao = ${b.observacao ?? null}, concluido_em = now(), registrado_por_ref = ${req.user.ref}::uuid
         WHERE id = ${atual.id}::uuid
       `;
+      await cancelarLembretes(tx, atual.id);
       await registrarHistorico(tx, {
         agendamentoId: atual.id, acao: b.status, anterior: { status: "agendado" },
         novo: { status: b.status, responsavelId, observacaoRealizacao: b.observacao ?? null }, autorRef: req.user.ref,

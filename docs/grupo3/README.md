@@ -5,7 +5,7 @@ Backend dos épicos E07 (agenda, cuidados e atendimentos), E08 (fisioterapia), E
 | Fatia | Escopo | Situação |
 |---|---|---|
 | 1 | `Colaborador` mínimo, US-065, US-066, US-067, US-068, US-069, US-072, US-073 | **Entregue** |
-| 2 | US-070, US-071, US-074 (lembretes + job) | A fazer |
+| 2 | US-070, US-071, US-074 (lembretes + job) | **Entregue** |
 | 3 | US-091, US-092, US-082, US-083, US-084, US-093 | A fazer |
 | 4 | US-085 a US-089 | A fazer |
 | 5 | US-075 a US-080 | A fazer |
@@ -46,7 +46,9 @@ Também dá para gravar `DATABASE_URL` no `.env`; uma variável já definida no 
 | `src/grupo3/regras.js` | Regras puras: conflito, transições, motivo, LGPD |
 | `src/grupo3/agenda.js` | Consultas da agenda, conflito com lock por profissional, histórico |
 | `src/grupo3/validacao.js` | Esquemas zod compartilhados |
-| `src/grupo3/portas/` | Portas de integração (`idosos.js`, `prontuario.js`) |
+| `src/grupo3/portas/` | Portas de integração (`idosos.js`, `prontuario.js`, `notificacoes.js`) |
+| `src/grupo3/lembretes.js` | Geração, cancelamento e envio dos lembretes (US-074) |
+| `src/grupo3/jobs.js` | Agendador dos jobs (`JOBS_ENABLED=true`), chamado por `src/server.js` |
 | `src/routes/grupo3/` | Rotas, montadas em `/api` por `index.js` |
 | `src/docs/openapi.grupo3.js` | OpenAPI do G3, juntado em `src/docs/openapi.js` |
 | `src/db/seedGrupo3.js` | Dados de demonstração |
@@ -64,6 +66,8 @@ erDiagram
     COLABORADOR ||--o{ AGENDAMENTO : "responsável pela realização"
     TIPO_ATENDIMENTO ||--o{ AGENDAMENTO : "tipo"
     AGENDAMENTO ||--o{ HISTORICO_AGENDAMENTO : "trilha"
+    AGENDAMENTO ||--o{ LEMBRETE_AGENDAMENTO : "lembretes"
+    COLABORADOR ||--o{ LEMBRETE_AGENDAMENTO : "destinatário"
     USERS_public ||--o| COLABORADOR : "usuario_ref (opcional)"
     PATIENTS_public ||--o{ AGENDAMENTO : "idoso_ref"
 
@@ -83,6 +87,7 @@ erDiagram
         bool exige_motivo_reagendamento
         bool permite_sobreposicao
         int tolerancia_realizacao_min "padrão 60"
+        int_array antecedencias_lembrete_min "null = padrão; [] = sem lembrete"
         bool ativo
     }
     AGENDAMENTO {
@@ -113,6 +118,21 @@ erDiagram
         uuid autor_ref "users.ref"
         timestamptz em
     }
+    LEMBRETE_AGENDAMENTO {
+        uuid id PK
+        uuid agendamento_id FK
+        uuid colaborador_id FK
+        uuid usuario_ref "users.ref do destinatário"
+        int antecedencia_min
+        timestamptz enviar_em
+        text canal "interno"
+        enum status "pendente | enviado | entregue | falha | sem_destinatario | cancelado"
+        int tentativas
+        text ultimo_erro
+        text notificacao_id "public.notifications.id"
+        timestamptz enviado_em
+        timestamptz entregue_em
+    }
 ```
 
 Integridade garantida no banco:
@@ -132,6 +152,10 @@ Integridade garantida no banco:
 **Status (US-068, US-069).** `agendado → realizado | nao_realizado | cancelado`. Reagendar mantém o mesmo registro e grava `anterior → novo` no histórico. O motivo é obrigatório conforme a configuração do tipo. A realização pode ser registrada a partir de `tolerancia_realizacao_min` minutos antes do início (configurável por tipo, padrão 60); antes disso a resposta é 422. O responsável padrão é o profissional do agendamento, e quem registrou fica em `registrado_por_ref` (`registradoPor` na API), no histórico e na auditoria. Para corrigir uma realização já registrada, use `corrigir-realizacao` (só `agenda.administrar`, motivo obrigatório); a correção entra no histórico como `corrigido`.
 
 **Agenda (US-066).** Dia, semana (segunda a domingo) ou mês, calculados no fuso da instituição (`grupo3.configuracao.fuso_horario`, padrão `America/Sao_Paulo`). Cada item traz `status` e `emConflito`; o `resumo` conta os itens por status e os em conflito.
+
+**Agenda da farmácia e de cuidados pessoais (US-070, US-071).** São a mesma agenda única, filtrada pela categoria do tipo (`farmacia` e `cuidado_pessoal`). `GET /api/agendas/farmacia` e `GET /api/agendas/cuidados-pessoais` mostram o período (dia, semana ou mês) com filtro por responsável (`profissionalId`, `responsavelRealizacaoId`) e por janela de atendimento (`janelaInicio`/`janelaFim`, HH:MM no fuso da instituição, aplicada à hora de início). Os mesmos filtros valem em `GET /api/agendamentos`. `GET /api/idosos/{idosoId}/cuidados-pessoais` resume, por serviço, a última realização (com responsável), o próximo agendamento e o total realizado.
+
+**Lembretes (US-074).** Ao agendar, o G3 cria um lembrete para o profissional em cada antecedência configurada: no tipo (`antecedencias_lembrete_min`) ou, se o tipo não define, no padrão da instituição (`grupo3.configuracao`, `lembretes.antecedencias_min`, 24 h). Antecedências que já passaram viram um único envio imediato; atendimento já iniciado não gera lembrete. Se o colaborador não tem usuário vinculado, o lembrete nasce como `sem_destinatario`; quando o usuário é vinculado, os lembretes futuros voltam para `pendente`. Reagendar cancela os lembretes pendentes e gera novos; cancelar ou registrar a realização cancela os pendentes. O job `processarLembretes` (a cada `JOBS_INTERVALO_SEG`, com `JOBS_ENABLED=true`) envia os vencidos pela porta de notificações, com `FOR UPDATE SKIP LOCKED`: o canal interno grava em `public.notifications` e marca `entregue`. Uma falha volta para a fila até `lembretes.max_tentativas` (3) e então vira `falha`, com o erro em `ultimoErro`. A mensagem leva tipo, idoso, data/hora e local, sem observações clínicas.
 
 **LGPD.** Nas categorias clínicas (consultas, avaliação e fisioterapia), `observacoes`, `motivoStatus` e `observacaoRealizacao` voltam `null`, com `conteudoRestrito: true`, para quem não tem `atendimento-clinico.visualizar` (consultas e avaliação) ou `fisioterapia.visualizar`. A exceção é o próprio profissional do agendamento. A trilha de histórico aplica a mesma regra.
 
@@ -162,6 +186,10 @@ A documentação completa, com exemplos e erros, está em `/api/docs`.
 | `GET /api/colaboradores/{id}/agenda?visao=dia\|semana\|mes&data=` | `agenda.visualizar` | 066 |
 | `GET /api/me/agenda?visao=&data=` | sessão autenticada | 066 |
 | `GET /api/idosos/{idosoId}/atendimentos` | `agenda.visualizar` | 072 |
+| `GET /api/agendas/farmacia?visao=&data=&profissionalId=&janelaInicio=&janelaFim=` | `agenda.visualizar` | 070 |
+| `GET /api/agendas/cuidados-pessoais?visao=&data=&profissionalId=&janelaInicio=&janelaFim=` | `agenda.visualizar` | 071 |
+| `GET /api/idosos/{idosoId}/cuidados-pessoais` | `agenda.visualizar` | 071 |
+| `GET /api/agendamentos/{id}/lembretes` | `agenda.visualizar` ou ser o profissional | 074 |
 
 Listagens: `page` e `limit` (máx. 100), resposta `{ data, meta }`. Datas com hora em ISO 8601 com fuso (`2026-11-10T14:00:00-03:00`); o banco grava em UTC. `idosoId` é o mesmo id usado no prontuário (ex.: `p02`).
 
@@ -207,5 +235,6 @@ Usa a auditoria da Fundação (`public.audit_log`, via `audit()` em `src/db/help
 | Idosos (G1, US-011) | `src/grupo3/portas/idosos.js` | Adaptador real sobre `public.patients` | `buscarIdoso(idosoId) → { id, ref, nome, ativo } \| null`; `buscarIdososPorRef(refs) → Map<ref, idoso>`. `ativo` é sempre `true`: `TODO(integracao-G1)` |
 | Prontuário — visibilidade (G1, US-031) | `src/grupo3/portas/prontuario.js` | Stub `TODO(integracao-G1)` | `podeVerIdoso(usuario, idoso) → boolean`, chamado no histórico do idoso |
 | Prontuário — linha do tempo (G1, US-023/US-030) | `src/grupo3/portas/prontuario.js` | Stub `TODO(integracao-G1)`; uso a partir da Fatia 4 | `publicarNoProntuario({ idosoRef, origem: "grupo3", tipo, referenciaId, ocorridoEm, profissional, resumo }) → { status }` |
-| Notificações (G4, US-117) | — | Fatia 2 | Lembrete vira `public.notifications`. Colaborador sem `usuario_ref` gera status `sem_destinatario` |
+| Notificações (G4, US-117) | `src/grupo3/portas/notificacoes.js` | Adaptador real do canal interno sobre `public.notifications`; `TODO(integracao-G4)` para o serviço do Grupo 4 | `enviarNotificacao({ usuarioId, titulo, corpo, link }, db) → { status: "enviado" \| "entregue", canal, referencia }`. Exceção = falha (o job tenta de novo) |
+| Jobs (T-008) | `src/grupo3/jobs.js` | Agendador no processo, ligado por `JOBS_ENABLED=true` | `processarLembretes({ agora, limite, enviar })` também pode ser chamado direto |
 | Indicadores (G5) | — | Fatia 6 | `GET /api/indicadores/atendimentos \| tarefas \| equipe` |

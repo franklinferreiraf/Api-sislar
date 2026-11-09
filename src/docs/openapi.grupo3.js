@@ -72,6 +72,7 @@ const exemploTipo = {
   exigeMotivoReagendamento: false,
   permiteSobreposicao: true,
   toleranciaRealizacaoMin: 60,
+  antecedenciasLembreteMin: null,
   ativo: true,
   criadoEm: "2026-11-09T12:00:00.000Z",
   atualizadoEm: "2026-11-09T12:00:00.000Z",
@@ -140,6 +141,11 @@ const corpoTipo = {
       type: "integer", minimum: 0, maximum: 1440, default: 60,
       description: "Minutos antes do início a partir dos quais a realização pode ser registrada.",
     },
+    antecedenciasLembreteMin: {
+      type: "array", nullable: true, maxItems: 5, default: null,
+      items: { type: "integer", minimum: 5, maximum: 10080 },
+      description: "Antecedências dos lembretes, em minutos. `null` usa o padrão da instituição (24 h); `[]` desliga os lembretes do tipo.",
+    },
   },
 };
 
@@ -153,13 +159,30 @@ const corpoColaborador = {
   },
 };
 
+const horario = { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$", example: "08:00" };
+const janela = [
+  query("janelaInicio", horario, "Hora de início a partir de (HH:MM, fuso da instituição)."),
+  query("janelaFim", horario, "Hora de início antes de (HH:MM, exclusivo). Precisa ser depois de janelaInicio."),
+];
+
 const filtrosAgenda = [
   query("inicio", dataHora, "Agendamentos que terminam depois deste instante."),
   query("fim", dataHora, "Agendamentos que começam antes deste instante."),
   query("profissionalId", uuid),
+  query("responsavelRealizacaoId", uuid, "Quem realizou o atendimento."),
   query("tipoId", uuid),
   query("categoria", categoria),
   query("status", statusAgendamento),
+  ...janela,
+];
+
+const visaoCategoria = [
+  query("visao", { type: "string", enum: ["dia", "semana", "mes"], default: "semana" }),
+  query("data", { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$", example: "2026-11-10" }, "Dia de referência no fuso da instituição. Padrão: hoje."),
+  query("profissionalId", uuid, "Responsável pelo atendimento."),
+  query("responsavelRealizacaoId", uuid),
+  query("status", statusAgendamento),
+  ...janela,
 ];
 
 const visaoAgenda = [
@@ -174,6 +197,18 @@ const exemploAgenda = {
   resumo: { total: 1, agendado: 1, realizado: 0, nao_realizado: 0, cancelado: 0, emConflito: 0 },
   data: [exemploAgendamento],
 };
+
+function exemploVisaoCategoria(cat) {
+  const item = { ...exemploAgendamento, tipo: { ...exemploAgendamento.tipo, categoria: cat }, observacoes: null };
+  return {
+    categoria: cat,
+    periodo: { visao: "dia", data: "2026-11-10", inicio: "2026-11-10T03:00:00.000Z", fim: "2026-11-11T03:00:00.000Z", fuso: "America/Sao_Paulo" },
+    janela: { inicio: "08:00", fim: "10:00" },
+    resumo: { total: 1, agendado: 1, realizado: 0, nao_realizado: 0, cancelado: 0, emConflito: 0 },
+    porProfissional: [{ id: exemploColaborador.id, nome: exemploColaborador.nome, total: 1 }],
+    data: [item],
+  };
+}
 
 const lgpd = "Em consultas, fisioterapia e avaliações, `observacoes`, `motivoStatus` e `observacaoRealizacao` voltam `null` "
   + "com `conteudoRestrito: true` para quem não tem a permissão clínica (`atendimento-clinico.visualizar` ou "
@@ -387,6 +422,61 @@ export const pathsGrupo3 = {
         ],
       },
       description: "Histórico imutável (gatilho no banco).",
+    }),
+  },
+  "/api/agendamentos/{id}/lembretes": {
+    get: op("G3 · Agenda", "Status dos lembretes do agendamento", "agenda.visualizar (ou ser o profissional do agendamento)", {
+      params: [path("id")],
+      errors: [404],
+      example: {
+        data: [
+          {
+            id: "7c0e2f4a-1b2c-4d3e-8f90-a1b2c3d4e5f6",
+            destinatario: { colaboradorId: exemploColaborador.id, nome: "Renata Gouveia", usuarioId: "s06" },
+            antecedenciaMin: 1440, enviarEm: "2026-11-09T17:00:00.000Z", canal: "interno", status: "entregue",
+            tentativas: 1, ultimoErro: null, enviadoEm: "2026-11-09T17:00:05.000Z", entregueEm: "2026-11-09T17:00:05.000Z",
+            criadoEm: "2026-11-08T12:00:00.000Z",
+          },
+          {
+            id: "8d1f3a5b-2c3d-4e5f-9a01-b2c3d4e5f6a7",
+            destinatario: { colaboradorId: "5d2c8f0e-0000-4b8e-9b61-7c3f3e2a1b01", nome: "Jorge Matias (cabeleireiro)", usuarioId: null },
+            antecedenciaMin: 1440, enviarEm: "2026-11-09T13:00:00.000Z", canal: "interno", status: "sem_destinatario",
+            tentativas: 0, ultimoErro: "Colaborador sem usuário do sistema vinculado.", enviadoEm: null, entregueEm: null,
+            criadoEm: "2026-11-08T12:00:00.000Z",
+          },
+        ],
+      },
+      description: "Um lembrete por antecedência configurada, para o profissional do agendamento. Status: `pendente`, `enviado`, `entregue`, `falha` (tentativas esgotadas), `sem_destinatario` (colaborador sem usuário ou usuário inativo) e `cancelado` (agendamento cancelado, realizado ou reagendado). O envio é feito pelo job (`JOBS_ENABLED=true`).",
+    }),
+  },
+  "/api/agendas/farmacia": {
+    get: op("G3 · Agenda", "Agenda da farmácia", "agenda.visualizar", {
+      query: visaoCategoria,
+      example: exemploVisaoCategoria("farmacia"),
+      description: "US-070. Agendamentos da categoria `farmacia` no período, filtrados por responsável (`profissionalId`, `responsavelRealizacaoId`) e janela de atendimento (`janelaInicio`/`janelaFim`, HH:MM no fuso da instituição, intervalo [início, fim) da hora de início).",
+    }),
+  },
+  "/api/agendas/cuidados-pessoais": {
+    get: op("G3 · Agenda", "Agenda de cuidados pessoais", "agenda.visualizar", {
+      query: visaoCategoria,
+      example: exemploVisaoCategoria("cuidado_pessoal"),
+      description: "US-071. Cabelo, barba, unhas e outros serviços da categoria `cuidado_pessoal`, com os mesmos filtros da agenda da farmácia.",
+    }),
+  },
+  "/api/idosos/{idosoId}/cuidados-pessoais": {
+    get: op("G3 · Agenda", "Cuidados pessoais do idoso por serviço", "agenda.visualizar", {
+      params: [path("idosoId", idosoId)],
+      errors: [404],
+      example: {
+        idoso: { id: "p04", nome: "Maria das Dores" },
+        data: [{
+          tipo: { id: exemploTipo.id, nome: "Corte de cabelo" },
+          totalRealizados: 3,
+          ultimaRealizacao: { agendamentoId: exemploAgendamento.id, inicio: "2026-10-05T13:00:00.000Z", responsavel: { id: exemploColaborador.id, nome: "Jorge Matias (cabeleireiro)" } },
+          proximoAgendamento: { agendamentoId: "2b3c4d5e-6f70-4812-9a3b-4c5d6e7f8091", inicio: "2026-11-10T13:00:00.000Z", profissional: { id: exemploColaborador.id, nome: "Jorge Matias (cabeleireiro)" } },
+        }],
+      },
+      description: "US-071. Para cada serviço de cuidado pessoal já agendado para o idoso: total realizado, última realização (com responsável) e próximo agendamento.",
     }),
   },
   "/api/idosos/{idosoId}/atendimentos": {

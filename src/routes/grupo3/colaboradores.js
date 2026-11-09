@@ -10,6 +10,7 @@ import { likeTerm } from "../../lib/schemas.js";
 import { asyncHandler } from "../../middleware/async.js";
 import { requirePerm } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validate.js";
+import { reativarLembretesSemDestinatario } from "../../grupo3/lembretes.js";
 import { idParam, usuarioId } from "../../grupo3/validacao.js";
 
 const router = Router();
@@ -129,6 +130,7 @@ router.put(
         SET nome = ${req.body.nome}, vinculo = ${req.body.vinculo}::grupo3.vinculo_colaborador, usuario_ref = ${ref}::uuid
         WHERE id = ${atual.id}::uuid
       `;
+      await reativarLembretesSemDestinatario(tx, atual.id, ref);
       await audit(tx, {
         userId: req.user.id, action: "colaborador.editar", entity: "grupo3.colaborador", entityId: atual.id,
         payload: { resultado: "sucesso", anterior: { vinculo: atual.vinculo, usuarioId: atual.usuario?.id ?? null }, novo: { vinculo: req.body.vinculo, usuarioId: req.body.usuarioId ?? null } },

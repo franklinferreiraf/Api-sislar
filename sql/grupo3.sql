@@ -11,6 +11,7 @@ CREATE TYPE categoria_atendimento AS ENUM (
   'consulta_medica','consulta_odontologica','fisioterapia','cuidado_pessoal','farmacia','avaliacao','outro'
 );
 CREATE TYPE status_agendamento AS ENUM ('agendado','realizado','nao_realizado','cancelado');
+CREATE TYPE status_lembrete AS ENUM ('pendente','enviado','entregue','falha','sem_destinatario','cancelado');
 
 -- Regras configuráveis do grupo (chave/valor). Ver docs/grupo3/decisoes-pendentes.md.
 CREATE TABLE configuracao (
@@ -20,7 +21,9 @@ CREATE TABLE configuracao (
   atualizado_em timestamptz NOT NULL DEFAULT now()
 );
 INSERT INTO configuracao (chave, valor, descricao) VALUES
-  ('fuso_horario', '"America/Sao_Paulo"', 'Fuso da instituição para dia/semana/mês.');
+  ('fuso_horario', '"America/Sao_Paulo"', 'Fuso da instituição para dia/semana/mês.'),
+  ('lembretes.antecedencias_min', '[1440]', 'Antecedências padrão dos lembretes, em minutos (tipo sem configuração própria).'),
+  ('lembretes.max_tentativas', '3', 'Tentativas de envio antes de marcar o lembrete como falha.');
 
 CREATE FUNCTION fuso_horario() RETURNS text LANGUAGE sql STABLE SET search_path = grupo3, pg_catalog AS $$
   SELECT coalesce((SELECT valor #>> '{}' FROM configuracao WHERE chave = 'fuso_horario'), 'America/Sao_Paulo')
@@ -84,6 +87,13 @@ CREATE TABLE tipo_atendimento (
   permite_sobreposicao boolean NOT NULL DEFAULT false,
   -- Quantos minutos antes do início a realização já pode ser registrada.
   tolerancia_realizacao_min integer NOT NULL DEFAULT 60 CHECK (tolerancia_realizacao_min BETWEEN 0 AND 1440),
+  -- Antecedências dos lembretes em minutos. NULL usa lembretes.antecedencias_min; vazio desliga os lembretes.
+  antecedencias_lembrete_min integer[] CHECK (
+    antecedencias_lembrete_min IS NULL OR (
+      cardinality(antecedencias_lembrete_min) <= 5
+      AND 5 <= ALL (antecedencias_lembrete_min) AND 10080 >= ALL (antecedencias_lembrete_min)
+    )
+  ),
   ativo boolean NOT NULL DEFAULT true,
   criado_em timestamptz NOT NULL DEFAULT now(),
   atualizado_em timestamptz NOT NULL DEFAULT now()
@@ -165,5 +175,35 @@ CREATE TABLE historico_agendamento (
 CREATE INDEX indice_historico_agendamento ON historico_agendamento (agendamento_id, em);
 CREATE TRIGGER preservar_historico_agendamento BEFORE UPDATE OR DELETE ON historico_agendamento
   FOR EACH ROW EXECUTE FUNCTION impedir_alteracao_historico();
+
+-- Lembretes de atendimento (US-074). O Grupo 3 agenda o envio e registra o status; a entrega é da
+-- camada de notificações (Grupo 4), acessada pela porta src/grupo3/portas/notificacoes.js.
+CREATE TABLE lembrete_agendamento (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  agendamento_id uuid NOT NULL REFERENCES agendamento(id),
+  colaborador_id uuid NOT NULL REFERENCES colaborador(id),
+  usuario_ref uuid,
+  antecedencia_min integer NOT NULL CHECK (antecedencia_min BETWEEN 5 AND 10080),
+  enviar_em timestamptz NOT NULL,
+  canal text NOT NULL DEFAULT 'interno' CHECK (canal ~ '^[a-z_]+$'),
+  status status_lembrete NOT NULL DEFAULT 'pendente',
+  tentativas integer NOT NULL DEFAULT 0 CHECK (tentativas >= 0),
+  ultimo_erro text CHECK (ultimo_erro IS NULL OR char_length(ultimo_erro) <= 500),
+  notificacao_id text,
+  enviado_em timestamptz,
+  entregue_em timestamptz,
+  criado_em timestamptz NOT NULL DEFAULT now(),
+  atualizado_em timestamptz NOT NULL DEFAULT now(),
+  CHECK (status NOT IN ('enviado','entregue') OR enviado_em IS NOT NULL),
+  CHECK (status <> 'entregue' OR entregue_em IS NOT NULL)
+);
+CREATE UNIQUE INDEX indice_lembrete_ativo ON lembrete_agendamento (agendamento_id, colaborador_id, antecedencia_min)
+  WHERE status IN ('pendente','sem_destinatario');
+CREATE INDEX indice_lembrete_fila ON lembrete_agendamento (enviar_em) WHERE status = 'pendente';
+CREATE INDEX indice_lembrete_agendamento ON lembrete_agendamento (agendamento_id);
+CREATE TRIGGER marcar_atualizacao_lembrete BEFORE UPDATE ON lembrete_agendamento
+  FOR EACH ROW EXECUTE FUNCTION marcar_atualizacao();
+CREATE TRIGGER impedir_exclusao_lembrete BEFORE DELETE ON lembrete_agendamento
+  FOR EACH ROW EXECUTE FUNCTION impedir_exclusao();
 
 COMMIT;
