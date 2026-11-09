@@ -85,7 +85,7 @@ const exemploColaborador = {
   status: "ativo",
   cargo: "Fisioterapeuta",
   setor: "Fisioterapia",
-  especialidade: "fisioterapia",
+  especialidade: { id: "6a7b8c9d-0e1f-4a2b-8c3d-4e5f6a7b8c9d", nome: "Fisioterapia" },
   registroProfissional: "CREFITO-3 000.321",
   email: "renata.gouveia@lardoirmaovelho.example",
   telefone: "(11) 90000-0006",
@@ -155,11 +155,12 @@ const corpoTipo = {
   },
 };
 
-const especialidade = {
-  type: "string", pattern: "^[a-z][a-z0-9_]{1,59}$", example: "clinica_medica",
-  description: "Área/especialidade em slug. É a chave usada na cobertura da escala.",
+const especialidadeId = {
+  type: "string", format: "uuid",
+  description: "Especialidade do catálogo (`/api/especialidades`), ativa. É a chave da cobertura da escala.",
 };
 const horario = { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$", example: "08:00" };
+const horarioFim = { type: "string", pattern: "^(([01]\\d|2[0-3]):[0-5]\\d|24:00)$", example: "24:00", description: "Aceita 24:00 (fim do dia)." };
 const dataDia = { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$", example: "2026-11-10" };
 
 const corpoColaborador = {
@@ -171,7 +172,7 @@ const corpoColaborador = {
     vinculo: { type: "string", enum: ["funcionario", "voluntario", "externo"] },
     cargo: { type: "string", minLength: 2, maxLength: 120, nullable: true },
     setor: { type: "string", minLength: 2, maxLength: 120, nullable: true },
-    especialidade: { ...especialidade, nullable: true },
+    especialidadeId: { ...especialidadeId, nullable: true },
     registroProfissional: { type: "string", maxLength: 60, nullable: true, example: "CRM-SP 000.000" },
     email: { type: "string", format: "email", maxLength: 160, nullable: true },
     telefone: { type: "string", pattern: "^[0-9 ()+-]{8,20}$", nullable: true },
@@ -233,12 +234,15 @@ const contatos = "`email` e `telefone` voltam `null`, com `contatosRestritos: tr
 
 const exemploEscala = {
   id: "3e4f5a6b-7c8d-4e9f-a0b1-c2d3e4f5a6b7",
-  colaborador: { id: exemploColaborador.id, nome: "Dra. Sônia Campos", vinculo: "voluntario" },
-  especialidade: "clinica_medica",
-  local: "Consultório 1",
+  colaborador: { id: exemploColaborador.id, nome: "Enf. Marcos Teles", vinculo: "funcionario" },
+  especialidade: { id: "7b8c9d0e-1f2a-4b3c-9d4e-5f6a7b8c9d0e", nome: "Enfermagem" },
+  local: "Posto de enfermagem",
   data: "2026-11-10",
-  horaInicio: "08:00",
-  horaFim: "12:00",
+  horaInicio: "19:00",
+  horaFim: "07:00",
+  cruzaMeiaNoite: true,
+  inicio: "2026-11-10T22:00:00.000Z",
+  fim: "2026-11-11T10:00:00.000Z",
   situacao: "confirmada",
   observacao: null,
   motivoCancelamento: null,
@@ -251,11 +255,11 @@ const corpoEscala = {
   required: ["colaboradorId", "local", "data", "horaInicio", "horaFim"],
   properties: {
     colaboradorId: uuid,
-    especialidade: { ...especialidade, nullable: true, description: "Padrão: especialidade do colaborador." },
+    especialidadeId: { ...especialidadeId, nullable: true, description: "Padrão: especialidade do colaborador." },
     local: { type: "string", minLength: 2, maxLength: 120 },
-    data: dataDia,
+    data: { ...dataDia, description: "Dia de início do turno, no fuso da instituição." },
     horaInicio: horario,
-    horaFim: { ...horario, description: "Depois de horaInicio. Turno que cruza a meia-noite vira dois registros." },
+    horaFim: { ...horario, description: "Menor ou igual a horaInicio = termina no dia seguinte (plantão 19:00–07:00 é um registro só). Igual a horaInicio é recusado." },
     situacao: { type: "string", enum: ["prevista", "confirmada"], default: "prevista" },
     observacao: { type: "string", maxLength: 500, nullable: true },
   },
@@ -273,6 +277,9 @@ const exemploPresenca = {
   situacao: "presente",
   horaEntrada: "07:00",
   horaSaida: null,
+  saidaNoDiaSeguinte: false,
+  entradaEm: "2026-11-10T10:00:00.000Z",
+  saidaEm: null,
   emAndamento: true,
   atividade: "Plantão diurno",
   justificativa: null,
@@ -291,6 +298,7 @@ export const tagsGrupo3 = [
   { name: "G3 · Agenda", description: "US-066 a US-073. Agendamentos, conflitos, reagendamento, cancelamento e realização." },
   { name: "G3 · Equipe", description: "US-082, US-091, US-092, US-093. Cadastro único de colaboradores, disponibilidade e presença." },
   { name: "G3 · Escalas", description: "US-083, US-084. Escala de atendimento (planejado), cobertura necessária e lacunas." },
+  { name: "G3 · Especialidades", description: "Catálogo de especialidades/áreas usado por colaborador, escala e cobertura." },
 ];
 
 export const pathsGrupo3 = {
@@ -332,7 +340,7 @@ export const pathsGrupo3 = {
         query("vinculo", { type: "string", enum: ["funcionario", "voluntario", "externo"] }),
         query("status", { type: "string", enum: ["ativo", "inativo"] }),
         query("setor", { type: "string", maxLength: 120 }),
-        query("especialidade", especialidade),
+        query("especialidadeId", especialidadeId),
         query("q", { type: "string", maxLength: 80 }),
       ],
       example: lista(exemploColaborador),
@@ -341,7 +349,7 @@ export const pathsGrupo3 = {
     post: op("G3 · Equipe", "Cadastrar colaborador", "equipe.criar", {
       status: 201, body: corpoColaborador,
       bodyExample: {
-        nome: "Renata Gouveia", vinculo: "funcionario", cargo: "Fisioterapeuta", setor: "Fisioterapia", especialidade: "fisioterapia",
+        nome: "Renata Gouveia", vinculo: "funcionario", cargo: "Fisioterapeuta", setor: "Fisioterapia", especialidadeId: "6a7b8c9d-0e1f-4a2b-8c3d-4e5f6a7b8c9d",
         registroProfissional: "CREFITO-3 000.321", email: "renata.gouveia@lardoirmaovelho.example", telefone: "(11) 90000-0006", usuarioId: "s06",
       },
       example: exemploColaborador,
@@ -365,6 +373,37 @@ export const pathsGrupo3 = {
       description: "Não há exclusão física. Colaborador inativo não recebe novos agendamentos.",
     }),
   },
+  "/api/especialidades": {
+    get: op("G3 · Especialidades", "Listar especialidades", "equipe.visualizar, equipe.administrar, agenda.visualizar, agenda.criar ou atendimento-clinico.visualizar", {
+      query: [...pagina, query("ativo", { type: "boolean" })],
+      example: lista({ id: "8c9d0e1f-2a3b-4c4d-8e5f-6a7b8c9d0e1f", nome: "Clínica médica", ativo: true, criadoEm: "2026-11-09T12:00:00.000Z", atualizadoEm: "2026-11-09T12:00:00.000Z" }),
+    }),
+    post: op("G3 · Especialidades", "Cadastrar especialidade", "equipe.administrar", {
+      status: 201,
+      body: { type: "object", required: ["nome"], properties: { nome: { type: "string", minLength: 2, maxLength: 80 } } },
+      bodyExample: { nome: "Geriatria" },
+      example: { id: "8c9d0e1f-2a3b-4c4d-8e5f-6a7b8c9d0e1f", nome: "Geriatria", ativo: true, criadoEm: "2026-11-09T12:00:00.000Z", atualizadoEm: "2026-11-09T12:00:00.000Z" },
+      conflictExample: erro("Já existe uma especialidade com esse nome."),
+      description: "Nome único, sem diferenciar maiúsculas e espaços nas pontas.",
+    }),
+  },
+  "/api/especialidades/{id}": {
+    get: op("G3 · Especialidades", "Detalhe da especialidade", "mesmas da listagem", { params: [path("id")], errors: [404] }),
+    put: op("G3 · Especialidades", "Renomear especialidade", "equipe.administrar", {
+      params: [path("id")],
+      body: { type: "object", required: ["nome"], properties: { nome: { type: "string", minLength: 2, maxLength: 80 } } },
+      errors: [404], conflictExample: erro("Já existe uma especialidade com esse nome."),
+    }),
+  },
+  "/api/especialidades/{id}/status": {
+    patch: op("G3 · Especialidades", "Ativar ou inativar especialidade", "equipe.administrar", {
+      params: [path("id")],
+      body: { type: "object", required: ["ativo"], properties: { ativo: { type: "boolean" } } },
+      bodyExample: { ativo: false },
+      errors: [404],
+      description: "Sem exclusão física. Especialidade inativa não pode ser atribuída a colaborador, escala ou cobertura (422); as referências existentes ficam.",
+    }),
+  },
   "/api/colaboradores/{id}/disponibilidades": {
     get: op("G3 · Equipe", "Disponibilidade semanal do colaborador", "equipe.visualizar, agenda.criar ou agenda.editar", {
       params: [path("id")], errors: [404],
@@ -381,7 +420,7 @@ export const pathsGrupo3 = {
             items: {
               type: "object", required: ["diaSemana", "horaInicio", "horaFim"],
               properties: {
-                diaSemana: { type: "integer", minimum: 1, maximum: 7 }, horaInicio: horario, horaFim: horario,
+                diaSemana: { type: "integer", minimum: 1, maximum: 7 }, horaInicio: horario, horaFim: horarioFim,
                 observacao: { type: "string", maxLength: 300, nullable: true },
               },
             },
@@ -391,23 +430,23 @@ export const pathsGrupo3 = {
       bodyExample: { disponibilidades: [{ diaSemana: 2, horaInicio: "13:00", horaFim: "17:00" }, { diaSemana: 4, horaInicio: "13:00", horaFim: "17:00" }] },
       errors: [404],
       example: { data: [{ id: "d1", diaSemana: 2, horaInicio: "13:00", horaFim: "17:00", observacao: null }] },
-      description: "Substitui a lista inteira (vazia = sem disponibilidade declarada). 422 para horários sobrepostos no mesmo dia.",
+      description: "Substitui a lista inteira (vazia = sem disponibilidade declarada). 422 para horários sobrepostos no mesmo dia. Disponibilidade noturna: dois dias (ex.: qua 19:00–24:00 e qui 00:00–07:00).",
     }),
   },
   "/api/escalas": {
     get: op("G3 · Escalas", "Listar escalas", "equipe.visualizar, agenda.visualizar ou atendimento-clinico.visualizar", {
       query: [
-        ...pagina, ...periodoDias, query("colaboradorId", uuid), query("especialidade", especialidade),
+        ...pagina, ...periodoDias, query("colaboradorId", uuid), query("especialidadeId", especialidadeId),
         query("situacao", { type: "string", enum: ["prevista", "confirmada", "cancelada"] }), query("local", { type: "string", maxLength: 120 }),
       ],
       example: { periodo: { inicio: "2026-11-10", fim: "2026-11-16" }, ...lista(exemploEscala) },
     }),
     post: op("G3 · Escalas", "Cadastrar escala (turno planejado)", "equipe.criar", {
       status: 201, body: corpoEscala,
-      bodyExample: { colaboradorId: exemploColaborador.id, local: "Consultório 1", data: "2026-11-10", horaInicio: "08:00", horaFim: "12:00", situacao: "confirmada" },
+      bodyExample: { colaboradorId: exemploColaborador.id, local: "Posto de enfermagem", data: "2026-11-10", horaInicio: "19:00", horaFim: "07:00", situacao: "confirmada" },
       example: { ...exemploEscala, avisos: [{ codigo: "fora_da_disponibilidade", mensagem: "Turno fora da disponibilidade declarada pelo colaborador." }] },
-      conflictExample: erro("O colaborador já está escalado nesse horário.", { conflitos: [{ escalaId: exemploEscala.id, local: "Consultório 1", horaInicio: "08:00", horaFim: "12:00" }] }),
-      description: "Colaborador precisa estar ativo. Turno sobreposto do mesmo colaborador (não cancelado) é 409, garantido também por restrição de exclusão no banco. `avisos` indica turno fora da disponibilidade declarada, sem impedir o cadastro.",
+      conflictExample: erro("O colaborador já está escalado nesse horário.", { conflitos: [{ escalaId: exemploEscala.id, local: "Posto de enfermagem", inicio: exemploEscala.inicio, fim: exemploEscala.fim }] }),
+      description: "Guarda início e fim em timestamptz. Colaborador precisa estar ativo. Turno sobreposto do mesmo colaborador (não cancelado), inclusive atravessando a meia-noite, é 409, garantido também por restrição de exclusão no banco. `avisos` indica turno fora da disponibilidade declarada (conferida trecho a trecho no fuso da instituição), sem impedir o cadastro.",
     }),
   },
   "/api/escalas/{id}": {
@@ -432,7 +471,7 @@ export const pathsGrupo3 = {
   },
   "/api/escalas/cobertura-necessaria": {
     get: op("G3 · Escalas", "Cobertura mínima configurada", "equipe.visualizar, agenda.visualizar ou atendimento-clinico.visualizar", {
-      example: { data: [{ id: "c1", especialidade: "clinica_medica", diaSemana: 1, horaInicio: "08:00", horaFim: "12:00", quantidadeMinima: 1 }] },
+      example: { data: [{ id: "c1", especialidade: { id: "8c9d0e1f-2a3b-4c4d-8e5f-6a7b8c9d0e1f", nome: "Clínica médica" }, diaSemana: 1, horaInicio: "08:00", horaFim: "12:00", quantidadeMinima: 1 }] },
     }),
     put: op("G3 · Escalas", "Substituir a cobertura mínima", "equipe.administrar", {
       body: {
@@ -441,30 +480,33 @@ export const pathsGrupo3 = {
           coberturas: {
             type: "array", maxItems: 200,
             items: {
-              type: "object", required: ["especialidade", "diaSemana", "horaInicio", "horaFim", "quantidadeMinima"],
+              type: "object", required: ["especialidadeId", "diaSemana", "horaInicio", "horaFim", "quantidadeMinima"],
               properties: {
-                especialidade, diaSemana: { type: "integer", minimum: 1, maximum: 7 }, horaInicio: horario, horaFim: horario,
+                especialidadeId, diaSemana: { type: "integer", minimum: 1, maximum: 7 }, horaInicio: horario, horaFim: horarioFim,
                 quantidadeMinima: { type: "integer", minimum: 1, maximum: 50 },
               },
             },
           },
         },
       },
-      bodyExample: { coberturas: [{ especialidade: "odontologia", diaSemana: 2, horaInicio: "13:00", horaFim: "17:00", quantidadeMinima: 1 }] },
-      example: { data: [{ id: "c1", especialidade: "odontologia", diaSemana: 2, horaInicio: "13:00", horaFim: "17:00", quantidadeMinima: 1 }] },
-      description: "Substitui toda a configuração; a versão anterior fica na auditoria. 422 para faixas sobrepostas da mesma especialidade no mesmo dia.",
+      bodyExample: { coberturas: [
+        { especialidadeId: "7b8c9d0e-1f2a-4b3c-9d4e-5f6a7b8c9d0e", diaSemana: 3, horaInicio: "19:00", horaFim: "24:00", quantidadeMinima: 1 },
+        { especialidadeId: "7b8c9d0e-1f2a-4b3c-9d4e-5f6a7b8c9d0e", diaSemana: 4, horaInicio: "00:00", horaFim: "07:00", quantidadeMinima: 1 },
+      ] },
+      example: { data: [{ id: "c1", especialidade: { id: "7b8c9d0e-1f2a-4b3c-9d4e-5f6a7b8c9d0e", nome: "Enfermagem" }, diaSemana: 3, horaInicio: "19:00", horaFim: "24:00", quantidadeMinima: 1 }] },
+      description: "Substitui toda a configuração; a versão anterior fica na auditoria. 422 para faixas sobrepostas da mesma especialidade no mesmo dia e para especialidade inexistente ou inativa. Necessidade noturna: duas faixas (dia 19:00–24:00 e dia seguinte 00:00–07:00).",
     }),
   },
   "/api/escalas/lacunas": {
     get: op("G3 · Escalas", "Lacunas na escala", "equipe.visualizar, agenda.visualizar ou atendimento-clinico.visualizar", {
-      query: [...periodoDias, query("especialidade", especialidade)],
+      query: [...periodoDias, query("especialidadeId", especialidadeId)],
       example: {
         periodo: { inicio: "2026-11-10", fim: "2026-11-16" },
         coberturasConsideradas: 7,
         resumo: { lacunas: 1, profissionaisFaltando: 1 },
-        data: [{ data: "2026-11-11", diaSemana: 3, especialidade: "clinica_medica", inicio: "10:00", fim: "12:00", necessario: 1, escalados: 0, faltam: 1 }],
+        data: [{ data: "2026-11-11", diaSemana: 3, especialidade: { id: "7b8c9d0e-1f2a-4b3c-9d4e-5f6a7b8c9d0e", nome: "Enfermagem" }, inicio: "05:00", fim: "07:00", necessario: 1, escalados: 0, faltam: 1 }],
       },
-      description: "Para cada dia do período e cada cobertura configurada, os trechos com menos escalados que o mínimo. Contam escalas `prevista` e `confirmada` de colaboradores ativos, da mesma especialidade.",
+      description: "Para cada dia do período e cada cobertura configurada, os trechos com menos escalados que o mínimo. Contam escalas `prevista` e `confirmada` de colaboradores ativos, da mesma especialidade; turnos que atravessam a meia-noite contam nos dois dias.",
     }),
   },
   "/api/presencas": {
@@ -494,7 +536,7 @@ export const pathsGrupo3 = {
       bodyExample: { colaboradorId: exemploColaborador.id, data: "2026-11-10", horaEntrada: "07:00", atividade: "Plantão diurno", escalaId: exemploEscala.id },
       example: exemploPresenca,
       conflictExample: erro("O colaborador já tem presença em aberto nesta data. Registre a saída antes."),
-      description: "Presença é o que aconteceu e fica separada da escala (o planejado). 409 se a escala já tem presença ou se há presença em aberto no dia.",
+      description: "Registro operacional do que aconteceu; **não substitui o controle de ponto**. Fica separado da escala (o planejado). horaSaida menor que horaEntrada = saída no dia seguinte. 409 se a escala já tem presença ou se o colaborador tem presença em aberto.",
     }),
   },
   "/api/presencas/{id}/saida": {

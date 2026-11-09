@@ -63,6 +63,20 @@ BEGIN
   RETURN NEW;
 END $$;
 
+-- Catálogo de especialidades/áreas (chave da cobertura da escala). Sem exclusão física: inativar.
+CREATE TABLE especialidade (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  nome text NOT NULL CHECK (char_length(btrim(nome)) BETWEEN 2 AND 80),
+  ativo boolean NOT NULL DEFAULT true,
+  criado_em timestamptz NOT NULL DEFAULT now(),
+  atualizado_em timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX indice_especialidade_nome ON especialidade (lower(btrim(nome)));
+CREATE TRIGGER marcar_atualizacao_especialidade BEFORE UPDATE ON especialidade
+  FOR EACH ROW EXECUTE FUNCTION marcar_atualizacao();
+CREATE TRIGGER impedir_exclusao_especialidade BEFORE DELETE ON especialidade
+  FOR EACH ROW EXECUTE FUNCTION impedir_exclusao();
+
 -- Cadastro único da equipe (funcionários, voluntários e externos) — US-082, US-091, US-092.
 -- Sem CPF nem documento: não há uso definido. Contatos só aparecem com equipe.visualizar.
 CREATE TABLE colaborador (
@@ -72,8 +86,7 @@ CREATE TABLE colaborador (
   status status_colaborador NOT NULL DEFAULT 'ativo',
   cargo text CHECK (cargo IS NULL OR char_length(cargo) BETWEEN 2 AND 120),
   setor text CHECK (setor IS NULL OR char_length(setor) BETWEEN 2 AND 120),
-  -- Área/especialidade em slug (ex.: clinica_medica, odontologia); é a chave da cobertura da escala.
-  especialidade text CHECK (especialidade IS NULL OR especialidade ~ '^[a-z][a-z0-9_]{1,59}$'),
+  especialidade_id uuid REFERENCES especialidade(id),
   registro_profissional text CHECK (registro_profissional IS NULL OR char_length(registro_profissional) <= 60),
   email text CHECK (email IS NULL OR (char_length(email) <= 160 AND email ~ '^[^@\s]+@[^@\s]+\.[^@\s]+$')),
   telefone text CHECK (telefone IS NULL OR telefone ~ '^[0-9 ()+-]{8,20}$'),
@@ -82,9 +95,11 @@ CREATE TABLE colaborador (
   atualizado_em timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX indice_colaborador_nome ON colaborador (lower(nome));
-CREATE INDEX indice_colaborador_especialidade ON colaborador (especialidade) WHERE especialidade IS NOT NULL;
+CREATE INDEX indice_colaborador_especialidade ON colaborador (especialidade_id) WHERE especialidade_id IS NOT NULL;
 
--- Disponibilidade semanal declarada (US-082, US-092). dia_semana ISO: 1 = segunda ... 7 = domingo.
+-- Disponibilidade semanal declarada (US-082, US-092), no relógio da instituição.
+-- dia_semana ISO: 1 = segunda ... 7 = domingo. hora_fim aceita 24:00 (fim do dia); disponibilidade que
+-- atravessa a meia-noite é declarada em dois dias (ex.: seg 19:00–24:00 e ter 00:00–07:00).
 CREATE TABLE disponibilidade_colaborador (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   colaborador_id uuid NOT NULL REFERENCES colaborador(id),
@@ -235,68 +250,72 @@ CREATE TRIGGER marcar_atualizacao_lembrete BEFORE UPDATE ON lembrete_agendamento
 CREATE TRIGGER impedir_exclusao_lembrete BEFORE DELETE ON lembrete_agendamento
   FOR EACH ROW EXECUTE FUNCTION impedir_exclusao();
 
--- Escala de atendimento: o PLANEJADO (US-083). Horários no relógio local da instituição.
--- Turno que cruza a meia-noite é cadastrado em dois registros.
+-- Escala de atendimento: o PLANEJADO (US-083). Instantes em timestamptz: um plantão 19h–07h é um
+-- registro só. A API recebe data + horários no fuso da instituição.
 CREATE TABLE escala (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   colaborador_id uuid NOT NULL REFERENCES colaborador(id),
-  especialidade text CHECK (especialidade IS NULL OR especialidade ~ '^[a-z][a-z0-9_]{1,59}$'),
+  especialidade_id uuid REFERENCES especialidade(id),
   local text NOT NULL CHECK (char_length(btrim(local)) BETWEEN 2 AND 120),
-  data date NOT NULL,
-  hora_inicio time NOT NULL,
-  hora_fim time NOT NULL,
+  inicio timestamptz NOT NULL,
+  fim timestamptz NOT NULL,
   situacao situacao_escala NOT NULL DEFAULT 'prevista',
   observacao text CHECK (observacao IS NULL OR char_length(observacao) <= 500),
   motivo_cancelamento text CHECK (motivo_cancelamento IS NULL OR char_length(motivo_cancelamento) <= 500),
   criado_por_ref uuid NOT NULL,
   criado_em timestamptz NOT NULL DEFAULT now(),
   atualizado_em timestamptz NOT NULL DEFAULT now(),
-  CHECK (hora_fim > hora_inicio),
+  CHECK (fim > inicio),
+  CHECK (fim - inicio <= interval '24 hours'),
   -- Mesmo colaborador não fica em dois turnos sobrepostos (cancelados não contam).
   EXCLUDE USING gist (
     colaborador_id public.gist_uuid_ops WITH =,
-    tsrange(data + hora_inicio, data + hora_fim) WITH &&
+    tstzrange(inicio, fim) WITH &&
   ) WHERE (situacao <> 'cancelada')
 );
-CREATE INDEX indice_escala_data ON escala (data, especialidade);
+CREATE INDEX indice_escala_periodo ON escala (inicio, fim);
+CREATE INDEX indice_escala_especialidade ON escala (especialidade_id, inicio);
 CREATE TRIGGER marcar_atualizacao_escala BEFORE UPDATE ON escala
   FOR EACH ROW EXECUTE FUNCTION marcar_atualizacao();
 CREATE TRIGGER impedir_exclusao_escala BEFORE DELETE ON escala
   FOR EACH ROW EXECUTE FUNCTION impedir_exclusao();
 
--- Necessidade mínima de cobertura da escala (US-084), configurável pela gestão.
+-- Necessidade mínima de cobertura da escala (US-084), configurável pela gestão. hora_fim aceita 24:00;
+-- necessidade noturna é declarada em dois dias (ex.: qua 19:00–24:00 e qui 00:00–07:00).
 CREATE TABLE cobertura_necessaria (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  especialidade text NOT NULL CHECK (especialidade ~ '^[a-z][a-z0-9_]{1,59}$'),
+  especialidade_id uuid NOT NULL REFERENCES especialidade(id),
   dia_semana smallint NOT NULL CHECK (dia_semana BETWEEN 1 AND 7),
   hora_inicio time NOT NULL,
   hora_fim time NOT NULL,
   quantidade_minima smallint NOT NULL CHECK (quantidade_minima BETWEEN 1 AND 50),
   CHECK (hora_fim > hora_inicio),
   EXCLUDE USING gist (
-    especialidade WITH =,
+    especialidade_id public.gist_uuid_ops WITH =,
     dia_semana WITH =,
     tsrange('2000-01-01'::date + hora_inicio, '2000-01-01'::date + hora_fim) WITH &&
   )
 );
 
--- Presença: o que ACONTECEU (US-093). Separada da escala; pode apontar para o turno previsto.
+-- Presença: o que ACONTECEU (US-093). Registro operacional, não é controle de ponto. Separada da escala;
+-- pode apontar para o turno previsto. "data" é o dia (no fuso da instituição) da entrada ou da ausência;
+-- entrada/saída em timestamptz para plantões que atravessam a meia-noite.
 CREATE TABLE presenca (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   colaborador_id uuid NOT NULL REFERENCES colaborador(id),
   escala_id uuid REFERENCES escala(id),
   data date NOT NULL,
   situacao situacao_presenca NOT NULL DEFAULT 'presente',
-  hora_entrada time,
-  hora_saida time,
+  entrada_em timestamptz,
+  saida_em timestamptz,
   atividade text CHECK (atividade IS NULL OR char_length(atividade) <= 300),
   justificativa text CHECK (justificativa IS NULL OR char_length(justificativa) <= 500),
   registrado_por_ref uuid NOT NULL,
   criado_em timestamptz NOT NULL DEFAULT now(),
   atualizado_em timestamptz NOT NULL DEFAULT now(),
-  CHECK (situacao <> 'presente' OR hora_entrada IS NOT NULL),
-  CHECK (situacao <> 'ausente' OR (hora_entrada IS NULL AND hora_saida IS NULL)),
-  CHECK (hora_saida IS NULL OR hora_saida > hora_entrada)
+  CHECK (situacao <> 'presente' OR entrada_em IS NOT NULL),
+  CHECK (situacao <> 'ausente' OR (entrada_em IS NULL AND saida_em IS NULL)),
+  CHECK (saida_em IS NULL OR (saida_em > entrada_em AND saida_em - entrada_em <= interval '24 hours'))
 );
 CREATE INDEX indice_presenca_data ON presenca (data, colaborador_id);
 CREATE UNIQUE INDEX indice_presenca_escala ON presenca (escala_id) WHERE escala_id IS NOT NULL;

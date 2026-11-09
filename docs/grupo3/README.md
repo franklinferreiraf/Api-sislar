@@ -49,7 +49,7 @@ Também dá para gravar `DATABASE_URL` no `.env`; uma variável já definida no 
 | `src/grupo3/portas/` | Portas de integração (`idosos.js`, `prontuario.js`, `notificacoes.js`) |
 | `src/grupo3/lembretes.js` | Geração, cancelamento e envio dos lembretes (US-074) |
 | `src/grupo3/jobs.js` | Agendador dos jobs (`JOBS_ENABLED=true`), chamado por `src/server.js` |
-| `src/routes/grupo3/` | Rotas, montadas em `/api` por `index.js` (`agendamentos`, `tipos-atendimento`, `colaboradores`, `escalas`, `presencas`) |
+| `src/routes/grupo3/` | Rotas, montadas em `/api` por `index.js` (`agendamentos`, `tipos-atendimento`, `colaboradores`, `especialidades`, `escalas`, `presencas`) |
 | `src/docs/openapi.grupo3.js` | OpenAPI do G3, juntado em `src/docs/openapi.js` |
 | `src/db/seedGrupo3.js` | Dados de demonstração |
 | `tests/grupo3.rules.test.js`, `tests/grupo3.api.test.js` | Testes unitários, de integração e de permissão |
@@ -68,6 +68,9 @@ erDiagram
     AGENDAMENTO ||--o{ HISTORICO_AGENDAMENTO : "trilha"
     AGENDAMENTO ||--o{ LEMBRETE_AGENDAMENTO : "lembretes"
     COLABORADOR ||--o{ LEMBRETE_AGENDAMENTO : "destinatário"
+    ESPECIALIDADE ||--o{ COLABORADOR : "especialidade"
+    ESPECIALIDADE ||--o{ ESCALA : "área do turno"
+    ESPECIALIDADE ||--o{ COBERTURA_NECESSARIA : "necessidade"
     COLABORADOR ||--o{ DISPONIBILIDADE_COLABORADOR : "declara"
     COLABORADOR ||--o{ ESCALA : "planejado"
     COLABORADOR ||--o{ PRESENCA : "aconteceu"
@@ -82,33 +85,37 @@ erDiagram
         enum status "ativo | inativo"
         text cargo
         text setor
-        text especialidade "slug, chave da cobertura"
+        uuid especialidade_id FK
         text registro_profissional
         text email "só com equipe.visualizar"
         text telefone "só com equipe.visualizar"
         uuid usuario_ref UK "users.ref, opcional"
+    }
+    ESPECIALIDADE {
+        uuid id PK
+        text nome UK
+        bool ativo
     }
     DISPONIBILIDADE_COLABORADOR {
         uuid id PK
         uuid colaborador_id FK
         smallint dia_semana "ISO 1 a 7"
         time hora_inicio
-        time hora_fim
+        time hora_fim "aceita 24:00"
     }
     ESCALA {
         uuid id PK
         uuid colaborador_id FK
-        text especialidade
+        uuid especialidade_id FK
         text local
-        date data
-        time hora_inicio
-        time hora_fim
+        timestamptz inicio
+        timestamptz fim "até 24 h depois; 19h-07h é um registro"
         enum situacao "prevista | confirmada | cancelada"
         text motivo_cancelamento
     }
     COBERTURA_NECESSARIA {
         uuid id PK
-        text especialidade
+        uuid especialidade_id FK
         smallint dia_semana
         time hora_inicio
         time hora_fim
@@ -120,8 +127,8 @@ erDiagram
         uuid escala_id FK "opcional, única"
         date data
         enum situacao "presente | ausente"
-        time hora_entrada
-        time hora_saida
+        timestamptz entrada_em
+        timestamptz saida_em
         text atividade
         text justificativa
         uuid registrado_por_ref
@@ -205,11 +212,13 @@ Integridade garantida no banco:
 
 **Lembretes (US-074).** Ao agendar, o G3 cria um lembrete para o profissional em cada antecedência configurada: no tipo (`antecedencias_lembrete_min`) ou, se o tipo não define, no padrão da instituição (`grupo3.configuracao`, `lembretes.antecedencias_min`, 24 h). Antecedências que já passaram viram um único envio imediato; agendamento com início no passado não gera lembrete, nem o imediato. Se o job encontrar um lembrete pendente cujo atendimento já começou (ex.: job parado), ele é cancelado com `ultimoErro` em vez de enviado. Se o colaborador não tem usuário vinculado, o lembrete nasce como `sem_destinatario`; quando o usuário é vinculado, só os lembretes de agendamentos ainda `agendado` e com início no futuro voltam para `pendente`. Reagendar, inclusive com troca de profissional, cancela os lembretes pendentes e gera novos para o profissional atual; o reagendamento é o único caminho que troca o profissional de um agendamento. Cancelar ou registrar a realização cancela os pendentes. O job `processarLembretes` (a cada `JOBS_INTERVALO_SEG`, com `JOBS_ENABLED=true`) envia os vencidos pela porta de notificações, com `FOR UPDATE SKIP LOCKED`: o canal interno grava em `public.notifications` e marca `entregue`. Uma falha volta para a fila até `lembretes.max_tentativas` (3) e então vira `falha`, com o erro em `ultimoErro`. A mensagem leva tipo, idoso, data/hora e local, sem observações clínicas.
 
-**Equipe (US-082, US-091, US-092).** Cadastro único de colaboradores: vínculo (`funcionario`, `voluntario`, `externo`), cargo, setor, status, especialidade (slug), registro profissional, contatos (e-mail e telefone) e usuário do sistema opcional. Não há CPF nem documento, porque não há uso definido para eles. Contatos só aparecem para quem tem `equipe.visualizar`; os demais recebem `email` e `telefone` como `null`, com `contatosRestritos: true`. A disponibilidade semanal é declarada por dia ISO (1 = segunda) e substituída inteira por `PUT`.
+**Equipe (US-082, US-091, US-092).** Cadastro único de colaboradores: vínculo (`funcionario`, `voluntario`, `externo`), cargo, setor, status, especialidade (FK para o catálogo `grupo3.especialidade`, mantido por quem tem `equipe.administrar` em `/api/especialidades`, sem exclusão física), registro profissional, contatos (e-mail e telefone) e usuário do sistema opcional. Não há CPF nem documento, porque não há uso definido para eles. Contatos só aparecem para quem tem `equipe.visualizar`; os demais recebem `email` e `telefone` como `null`, com `contatosRestritos: true`. A disponibilidade semanal é declarada por dia ISO (1 = segunda), no relógio da instituição, e substituída inteira por `PUT`; `24:00` marca o fim do dia, e disponibilidade noturna é declarada em dois dias.
 
-**Escala x presença (US-083, US-093).** São tabelas separadas. A **escala** é o planejado: colaborador, especialidade, local, data, horário e situação (`prevista`, `confirmada`, `cancelada`). O mesmo colaborador não pode ter turnos sobrepostos não cancelados (lock por colaborador + restrição de exclusão `btree_gist` no banco). Turno fora da disponibilidade declarada é aceito com aviso em `avisos`. A **presença** é o que aconteceu: entrada/saída ou ausência com justificativa, por data, opcionalmente ligada ao turno previsto (uma presença por escala, mesmo colaborador e data). Cancelar uma escala não apaga a presença registrada. Presença só para hoje ou passado.
+**Escala x presença (US-083, US-093).** São tabelas separadas. A **escala** é o planejado: colaborador, especialidade, local, início e fim (`timestamptz`) e situação (`prevista`, `confirmada`, `cancelada`). A API recebe data + horários no fuso da instituição; `horaFim` menor ou igual a `horaInicio` termina no dia seguinte, então o plantão 19h–07h é **um registro só** (até 24 h). O mesmo colaborador não pode ter turnos sobrepostos não cancelados, inclusive dos dois lados da meia-noite (lock por colaborador + restrição de exclusão `btree_gist` sobre `tstzrange(inicio, fim)`). Turno fora da disponibilidade declarada (conferida trecho a trecho no fuso da instituição) é aceito com aviso em `avisos`. A **presença** é o que aconteceu: entrada/saída (`timestamptz`; saída antes da entrada = dia seguinte) ou ausência com justificativa, opcionalmente ligada ao turno previsto (uma presença por escala, mesmo colaborador e mesma data de início). Cancelar uma escala não apaga a presença registrada. Presença só para hoje ou passado.
 
-**Lacunas (US-084).** A cobertura mínima (`cobertura_necessaria`) é configurada por especialidade, dia da semana e faixa horária. `GET /api/escalas/lacunas` cruza essa necessidade com as escalas `prevista`/`confirmada` de colaboradores ativos da mesma especialidade e devolve os trechos abaixo do mínimo, com quantos estão escalados e quantos faltam.
+> **A presença (US-093) é registro operacional de quem está trabalhando. Ela não substitui o controle de ponto**: não tem as garantias legais de um sistema de ponto (marcação pelo próprio trabalhador, inalterabilidade, espelho de ponto) e não deve ser usada para folha de pagamento ou jornada.
+
+**Lacunas (US-084).** A cobertura mínima (`cobertura_necessaria`) é configurada por especialidade (FK), dia da semana e faixa horária (`24:00` = fim do dia; necessidade noturna em duas faixas). `GET /api/escalas/lacunas` cruza essa necessidade com as escalas `prevista`/`confirmada` de colaboradores ativos da mesma especialidade, recortando cada turno nos dias que ele toca (um plantão 19h–05h conta na noite do primeiro dia e na madrugada do segundo), e devolve os trechos abaixo do mínimo, com quantos estão escalados e quantos faltam.
 
 **LGPD.** Nas categorias clínicas (consultas, avaliação e fisioterapia), `observacoes`, `motivoStatus` e `observacaoRealizacao` voltam `null`, com `conteudoRestrito: true`, para quem não tem `atendimento-clinico.visualizar` (consultas e avaliação) ou `fisioterapia.visualizar`. A exceção é o próprio profissional do agendamento. A trilha de histórico aplica a mesma regra.
 
@@ -224,7 +233,7 @@ A documentação completa, com exemplos e erros, está em `/api/docs`.
 | `POST /api/tipos-atendimento` | `agenda.administrar` | 065 |
 | `PUT /api/tipos-atendimento/{id}` | `agenda.administrar` | 065 |
 | `PATCH /api/tipos-atendimento/{id}/status` | `agenda.administrar` | 065 |
-| `GET /api/colaboradores?vinculo&status&setor&especialidade&q` · `GET /api/colaboradores/{id}` | `equipe.visualizar`, `agenda.criar` ou `agenda.editar` (contatos só com `equipe.visualizar`) | 082, 091, 092 |
+| `GET /api/colaboradores?vinculo&status&setor&especialidadeId&q` · `GET /api/colaboradores/{id}` | `equipe.visualizar`, `agenda.criar` ou `agenda.editar` (contatos só com `equipe.visualizar`) | 082, 091, 092 |
 | `POST /api/colaboradores` | `equipe.criar` | 082, 091, 092 |
 | `PUT /api/colaboradores/{id}` | `equipe.editar` | 082, 091, 092 |
 | `PATCH /api/colaboradores/{id}/status` | `equipe.excluir` | 091, 092 |
@@ -244,16 +253,18 @@ A documentação completa, com exemplos e erros, está em `/api/docs`.
 | `GET /api/agendas/cuidados-pessoais?visao=&data=&profissionalId=&janelaInicio=&janelaFim=` | `agenda.visualizar` | 071 |
 | `GET /api/idosos/{idosoId}/cuidados-pessoais` | `agenda.visualizar` | 071 |
 | `GET /api/agendamentos/{id}/lembretes` | `agenda.visualizar` ou ser o profissional | 074 |
+| `GET /api/especialidades` · `GET /api/especialidades/{id}` | `equipe.visualizar`, `equipe.administrar`, `agenda.visualizar`, `agenda.criar` ou `atendimento-clinico.visualizar` | 082, 084 |
+| `POST /api/especialidades` · `PUT /api/especialidades/{id}` · `PATCH /api/especialidades/{id}/status` | `equipe.administrar` | 082, 084 |
 | `GET /api/colaboradores/{id}/disponibilidades` | `equipe.visualizar`, `agenda.criar` ou `agenda.editar` | 082, 092 |
 | `PUT /api/colaboradores/{id}/disponibilidades` | `equipe.editar` | 082, 092 |
-| `GET /api/escalas?inicio&fim&colaboradorId&especialidade&situacao&local` | `equipe.visualizar`, `agenda.visualizar` ou `atendimento-clinico.visualizar` | 083 |
+| `GET /api/escalas?inicio&fim&colaboradorId&especialidadeId&situacao&local` | `equipe.visualizar`, `agenda.visualizar` ou `atendimento-clinico.visualizar` | 083 |
 | `GET /api/escalas/{id}` | idem | 083 |
 | `POST /api/escalas` | `equipe.criar` | 083 |
 | `PUT /api/escalas/{id}` | `equipe.editar` | 083 |
 | `PATCH /api/escalas/{id}/situacao` | `equipe.editar` | 083 |
 | `GET /api/escalas/cobertura-necessaria` | `equipe.visualizar`, `agenda.visualizar` ou `atendimento-clinico.visualizar` | 084 |
 | `PUT /api/escalas/cobertura-necessaria` | `equipe.administrar` | 084 |
-| `GET /api/escalas/lacunas?inicio&fim&especialidade` | `equipe.visualizar`, `agenda.visualizar` ou `atendimento-clinico.visualizar` | 084 |
+| `GET /api/escalas/lacunas?inicio&fim&especialidadeId` | `equipe.visualizar`, `agenda.visualizar` ou `atendimento-clinico.visualizar` | 084 |
 | `GET /api/presencas?data&inicio&fim&colaboradorId&vinculo&situacao&emAndamento` | `equipe.visualizar` | 093 |
 | `POST /api/presencas` | `equipe.criar` | 093 |
 | `PATCH /api/presencas/{id}/saida` | `equipe.criar` ou `equipe.editar` | 093 |
@@ -295,6 +306,7 @@ Usa a auditoria da Fundação (`public.audit_log`, via `audit()` em `src/db/help
 | `colaborador.criar` · `editar` · `ativar` · `inativar` | Alterações em colaboradores |
 | `agendamento.criar` · `reagendar` · `cancelar` · `realizado` · `nao_realizado` · `corrigir_realizacao` | Alterações em agendamentos; criar e reagendar também registram recusas por conflito |
 | `colaborador.disponibilidade` | Substituição da disponibilidade |
+| `especialidade.criar` · `editar` · `ativar` · `inativar` | Alterações no catálogo de especialidades |
 | `escala.criar` · `editar` · `situacao` | Alterações em escalas |
 | `escala.cobertura` | Substituição da cobertura mínima (com a versão anterior) |
 | `presenca.registrar` · `saida` | Registro de presença e saída |

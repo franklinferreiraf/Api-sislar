@@ -14,16 +14,18 @@ const TIPOS = [
   ["Avaliação multiprofissional", "avaliacao", 60, true, true, false],
 ];
 
+const ESPECIALIDADES = ["Clínica médica", "Odontologia", "Fisioterapia", "Farmácia", "Enfermagem"];
+
 const COLABORADORES = [
   // [chave, nome, vínculo, usuário, cargo, setor, especialidade, registro, e-mail, telefone] — dados fictícios
-  ["medico", "Dr. Paulo Ferraz Neto", "funcionario", "s05", "Médico geriatra", "Atendimento médico", "clinica_medica", "CRM-SP 000.789 (fictício)", "paulo.ferraz@lardoirmaovelho.example", "(11) 90000-0005"],
-  ["fisio", "Renata Gouveia", "funcionario", "s06", "Fisioterapeuta", "Fisioterapia", "fisioterapia", "CREFITO-3 000.321 (fictício)", "renata.gouveia@lardoirmaovelho.example", "(11) 90000-0006"],
-  ["dentista", "Dra. Luciana Prado", "voluntario", "s07", "Cirurgiã-dentista voluntária", "Odontologia", "odontologia", "CRO-SP 000.654 (fictício)", "luciana.prado@lardoirmaovelho.example", "(11) 90000-0007"],
-  ["farmacia", "Tiago Menezes", "funcionario", "s08", "Farmacêutico", "Farmácia", "farmacia", "CRF-SP 000.987 (fictício)", null, "(11) 90000-0008"],
-  ["enfermeira", "Carla Beatriz Nunes", "funcionario", "s03", "Enfermeira responsável técnica", "Enfermagem", "enfermagem", "COREN-SP 000.123 (fictício)", null, "(11) 90000-0003"],
+  ["medico", "Dr. Paulo Ferraz Neto", "funcionario", "s05", "Médico geriatra", "Atendimento médico", "Clínica médica", "CRM-SP 000.789 (fictício)", "paulo.ferraz@lardoirmaovelho.example", "(11) 90000-0005"],
+  ["fisio", "Renata Gouveia", "funcionario", "s06", "Fisioterapeuta", "Fisioterapia", "Fisioterapia", "CREFITO-3 000.321 (fictício)", "renata.gouveia@lardoirmaovelho.example", "(11) 90000-0006"],
+  ["dentista", "Dra. Luciana Prado", "voluntario", "s07", "Cirurgiã-dentista voluntária", "Odontologia", "Odontologia", "CRO-SP 000.654 (fictício)", "luciana.prado@lardoirmaovelho.example", "(11) 90000-0007"],
+  ["farmacia", "Tiago Menezes", "funcionario", "s08", "Farmacêutico", "Farmácia", "Farmácia", "CRF-SP 000.987 (fictício)", null, "(11) 90000-0008"],
+  ["enfermeira", "Carla Beatriz Nunes", "funcionario", "s03", "Enfermeira responsável técnica", "Enfermagem", "Enfermagem", "COREN-SP 000.123 (fictício)", null, "(11) 90000-0003"],
   ["voluntaria", "Helena Duarte", "voluntario", "s11", "Voluntária de cuidados pessoais", "Voluntariado", null, null, null, "(11) 90000-0011"],
   ["cabeleireiro", "Jorge Matias (cabeleireiro)", "externo", null, "Cabeleireiro", "Cuidados pessoais", null, null, null, "(11) 90000-0099"],
-  ["medico_voluntario", "Dra. Sônia Campos", "voluntario", null, "Médica clínica voluntária", "Atendimento médico", "clinica_medica", "CRM-SP 000.111 (fictício)", null, null],
+  ["medico_voluntario", "Dra. Sônia Campos", "voluntario", null, "Médica clínica voluntária", "Atendimento médico", "Clínica médica", "CRM-SP 000.111 (fictício)", null, null],
 ];
 
 function emDiaLocal(dias) {
@@ -61,12 +63,19 @@ export async function seedGrupo3(tx) {
     tipos[nome] = { id: rows[0].id, duracao };
   }
 
+  const especialidades = {};
+  for (const nome of ESPECIALIDADES) {
+    const rows = await tx.$queryRaw`INSERT INTO grupo3.especialidade (nome) VALUES (${nome}) RETURNING id`;
+    especialidades[nome] = rows[0].id;
+  }
+
   const colaboradores = {};
   for (const [chave, nome, vinculo, usuario, cargo, setor, especialidade, registro, email, telefone] of COLABORADORES) {
     const ref = usuario ? await refDe(tx, "users", usuario) : null;
+    const especialidadeId = especialidade ? especialidades[especialidade] : null;
     const rows = await tx.$queryRaw`
-      INSERT INTO grupo3.colaborador (nome, vinculo, usuario_ref, cargo, setor, especialidade, registro_profissional, email, telefone)
-      VALUES (${nome}, ${vinculo}::grupo3.vinculo_colaborador, ${ref}::uuid, ${cargo}, ${setor}, ${especialidade},
+      INSERT INTO grupo3.colaborador (nome, vinculo, usuario_ref, cargo, setor, especialidade_id, registro_profissional, email, telefone)
+      VALUES (${nome}, ${vinculo}::grupo3.vinculo_colaborador, ${ref}::uuid, ${cargo}, ${setor}, ${especialidadeId}::uuid,
               ${registro}, ${email}, ${telefone})
       RETURNING id
     `;
@@ -123,14 +132,14 @@ export async function seedGrupo3(tx) {
 
   // Necessidade mínima: clínico de segunda a sexta de manhã; odontologia terça e quinta à tarde.
   const coberturas = [
-    ...[1, 2, 3, 4, 5].map((diaSemana) => ["clinica_medica", diaSemana, "08:00", "12:00", 1]),
-    ["odontologia", 2, "13:00", "17:00", 1],
-    ["odontologia", 4, "13:00", "17:00", 1],
+    ...[1, 2, 3, 4, 5].map((diaSemana) => ["Clínica médica", diaSemana, "08:00", "12:00", 1]),
+    ["Odontologia", 2, "13:00", "17:00", 1],
+    ["Odontologia", 4, "13:00", "17:00", 1],
   ];
   for (const [especialidade, diaSemana, inicio, fim, minimo] of coberturas) {
     await tx.$executeRaw`
-      INSERT INTO grupo3.cobertura_necessaria (especialidade, dia_semana, hora_inicio, hora_fim, quantidade_minima)
-      VALUES (${especialidade}, ${diaSemana}, ${inicio}::time, ${fim}::time, ${minimo})
+      INSERT INTO grupo3.cobertura_necessaria (especialidade_id, dia_semana, hora_inicio, hora_fim, quantidade_minima)
+      VALUES (${especialidades[especialidade]}::uuid, ${diaSemana}, ${inicio}::time, ${fim}::time, ${minimo})
     `;
   }
 
@@ -141,11 +150,12 @@ export async function seedGrupo3(tx) {
     const diaSemana = ((new Date(`${data}T00:00:00Z`).getUTCDay() + 6) % 7) + 1;
     for (const [chave, dia, inicio, fim] of disponibilidades) {
       if (dia !== diaSemana || !["medico", "medico_voluntario", "dentista"].includes(chave)) continue;
-      const especialidade = chave === "dentista" ? "odontologia" : "clinica_medica";
+      const especialidade = especialidades[chave === "dentista" ? "Odontologia" : "Clínica médica"];
       const rows = await tx.$queryRaw`
-        INSERT INTO grupo3.escala (colaborador_id, especialidade, local, data, hora_inicio, hora_fim, situacao, criado_por_ref)
-        VALUES (${colaboradores[chave]}::uuid, ${especialidade}, ${chave === "dentista" ? "Consultório odontológico" : "Consultório 1"},
-                ${data}::date, ${inicio}::time, ${fim}::time, 'confirmada', ${autor}::uuid)
+        INSERT INTO grupo3.escala (colaborador_id, especialidade_id, local, inicio, fim, situacao, criado_por_ref)
+        VALUES (${colaboradores[chave]}::uuid, ${especialidade}::uuid, ${chave === "dentista" ? "Consultório odontológico" : "Consultório 1"},
+                (${data}::date + ${inicio}::time) AT TIME ZONE grupo3.fuso_horario(),
+                (${data}::date + ${fim}::time) AT TIME ZONE grupo3.fuso_horario(), 'confirmada', ${autor}::uuid)
         RETURNING id
       `;
       escalaIds[`${chave}:${offset}`] = rows[0].id;
@@ -162,9 +172,10 @@ export async function seedGrupo3(tx) {
   ];
   for (const [chave, situacao, entrada, saida, atividade, justificativa] of presencas) {
     await tx.$executeRaw`
-      INSERT INTO grupo3.presenca (colaborador_id, data, situacao, hora_entrada, hora_saida, atividade, justificativa, registrado_por_ref)
-      VALUES (${colaboradores[chave]}::uuid, ${hoje}::date, ${situacao}::grupo3.situacao_presenca, ${entrada}::time,
-              ${saida}::time, ${atividade}, ${justificativa}, ${autor}::uuid)
+      INSERT INTO grupo3.presenca (colaborador_id, data, situacao, entrada_em, saida_em, atividade, justificativa, registrado_por_ref)
+      VALUES (${colaboradores[chave]}::uuid, ${hoje}::date, ${situacao}::grupo3.situacao_presenca,
+              (${hoje}::date + ${entrada}::time) AT TIME ZONE grupo3.fuso_horario(),
+              (${hoje}::date + ${saida}::time) AT TIME ZONE grupo3.fuso_horario(), ${atividade}, ${justificativa}, ${autor}::uuid)
     `;
   }
 }

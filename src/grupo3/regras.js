@@ -175,13 +175,15 @@ export function horariosSobrepoem(a, b) {
 
 /**
  * Trechos da faixa necessária com menos profissionais escalados que o mínimo.
- * `necessidade` = { inicio: "HH:MM", fim: "HH:MM", minimo }; `turnos` = [{ inicio, fim }] do mesmo dia e área.
+ * `necessidade` = { inicio: "HH:MM", fim: "HH:MM" (aceita "24:00"), minimo }; `turnos` = [{ inicio, fim }] do
+ * mesmo dia e área, em "HH:MM" ou em minutos desde a meia-noite (0 a 1440) já recortados para o dia.
  * Trechos vizinhos com a mesma contagem são unidos.
  */
 export function calcularLacunas(necessidade, turnos) {
-  const ini = minutosDoDia(necessidade.inicio);
-  const fim = minutosDoDia(necessidade.fim);
-  const faixas = turnos.map((t) => [minutosDoDia(t.inicio), minutosDoDia(t.fim)]);
+  const paraMin = (valor) => (typeof valor === "number" ? valor : minutosDoDia(valor));
+  const ini = paraMin(necessidade.inicio);
+  const fim = paraMin(necessidade.fim);
+  const faixas = turnos.map((t) => [paraMin(t.inicio), paraMin(t.fim)]);
   const marcos = new Set([ini, fim]);
   for (const [a, b] of faixas) {
     if (a > ini && a < fim) marcos.add(a);
@@ -230,4 +232,46 @@ export function mascararContatos(colaborador, usuario) {
   const copia = { ...colaborador, contatosRestritos: true };
   for (const campo of CAMPOS_CONTATO) copia[campo] = null;
   return copia;
+}
+
+// ---------- Turnos que atravessam a meia-noite ----------
+
+export function somarDias(data, dias) {
+  return new Date(Date.parse(`${data}T00:00:00Z`) + dias * 86_400_000).toISOString().slice(0, 10);
+}
+
+// Fim menor ou igual ao início indica que o turno termina no dia seguinte.
+export function cruzaMeiaNoite(horaInicio, horaFim) {
+  return minutosDoDia(horaFim) <= minutosDoDia(horaInicio);
+}
+
+/** Divide um turno local em trechos por dia: 19:00–07:00 vira [dia 19:00–24:00, dia+1 00:00–07:00]. */
+export function segmentosDoTurno(data, horaInicio, horaFim) {
+  if (!cruzaMeiaNoite(horaInicio, horaFim)) {
+    return [{ data, diaSemana: diaSemanaIso(data), inicio: horaInicio, fim: horaFim }];
+  }
+  const seguinte = somarDias(data, 1);
+  const segmentos = [{ data, diaSemana: diaSemanaIso(data), inicio: horaInicio, fim: "24:00" }];
+  if (horaFim !== "00:00") segmentos.push({ data: seguinte, diaSemana: diaSemanaIso(seguinte), inicio: "00:00", fim: horaFim });
+  return segmentos;
+}
+
+/** Turno inteiro dentro da disponibilidade (comparada no fuso da instituição, trecho a trecho). */
+export function turnoDentroDaDisponibilidade(disponibilidades, data, horaInicio, horaFim) {
+  if (!disponibilidades.length) return null;
+  return segmentosDoTurno(data, horaInicio, horaFim)
+    .every((seg) => dentroDaDisponibilidade(disponibilidades, seg.diaSemana, seg.inicio, seg.fim) === true);
+}
+
+/**
+ * Recorta um turno (horários locais "AAAA-MM-DD HH:MM") para os minutos de um dia: { inicio, fim } em
+ * 0..1440, ou null se o turno não toca o dia.
+ */
+export function recortarNoDia(inicioLocal, fimLocal, data) {
+  const base = Date.parse(`${data}T00:00:00Z`);
+  const ini = (Date.parse(`${inicioLocal.replace(" ", "T")}:00Z`) - base) / 60_000;
+  const fim = (Date.parse(`${fimLocal.replace(" ", "T")}:00Z`) - base) / 60_000;
+  const a = Math.max(ini, 0);
+  const b = Math.min(fim, 1440);
+  return b > a ? { inicio: a, fim: b } : null;
 }

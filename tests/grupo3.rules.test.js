@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  recortarNoDia,
+  segmentosDoTurno,
+  turnoDentroDaDisponibilidade,
   calcularEnvios,
   calcularLacunas,
   dentroDaDisponibilidade,
@@ -239,5 +242,32 @@ describe("grupo3 · disponibilidade e contatos (US-082, US-091, US-092)", () => 
     assert.equal(restrito.cargo, "Cuidadora");
     assert.equal(restrito.contatosRestritos, true);
     assert.equal(mascararContatos(colaborador, { permissions: ["equipe.visualizar"] }).email, "f@x.example");
+  });
+});
+
+describe("grupo3 · turnos que atravessam a meia-noite", () => {
+  it("divide 19h–07h em dois trechos e 19h–00h em um", () => {
+    assert.deepEqual(segmentosDoTurno("2030-06-05", "19:00", "07:00"), [
+      { data: "2030-06-05", diaSemana: 3, inicio: "19:00", fim: "24:00" },
+      { data: "2030-06-06", diaSemana: 4, inicio: "00:00", fim: "07:00" },
+    ]);
+    assert.equal(segmentosDoTurno("2030-06-05", "19:00", "00:00").length, 1);
+  });
+
+  it("disponibilidade conferida trecho a trecho no fuso local", () => {
+    const disp = [{ diaSemana: 3, inicio: "19:00", fim: "24:00" }, { diaSemana: 4, inicio: "00:00", fim: "07:00" }];
+    assert.equal(turnoDentroDaDisponibilidade(disp, "2030-06-05", "19:00", "07:00"), true);
+    assert.equal(turnoDentroDaDisponibilidade(disp, "2030-06-05", "19:00", "08:00"), false);
+    assert.equal(turnoDentroDaDisponibilidade([], "2030-06-05", "19:00", "07:00"), null);
+  });
+
+  it("recorta o turno no dia e a lacuna aceita minutos", () => {
+    assert.deepEqual(recortarNoDia("2030-06-05 19:00", "2030-06-06 05:00", "2030-06-06"), { inicio: 0, fim: 300 });
+    assert.deepEqual(recortarNoDia("2030-06-05 19:00", "2030-06-06 05:00", "2030-06-05"), { inicio: 1140, fim: 1440 });
+    assert.equal(recortarNoDia("2030-06-05 08:00", "2030-06-05 12:00", "2030-06-06"), null);
+    assert.deepEqual(calcularLacunas({ inicio: "00:00", fim: "07:00", minimo: 1 }, [{ inicio: 0, fim: 300 }]), [
+      { inicio: "05:00", fim: "07:00", necessario: 1, escalados: 0, faltam: 1 },
+    ]);
+    assert.deepEqual(calcularLacunas({ inicio: "19:00", fim: "24:00", minimo: 1 }, [{ inicio: 1140, fim: 1440 }]), []);
   });
 });

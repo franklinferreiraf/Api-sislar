@@ -13,7 +13,8 @@ import { requirePerm } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validate.js";
 import { reativarLembretesSemDestinatario } from "../../grupo3/lembretes.js";
 import { horariosSobrepoem, mascararContatos } from "../../grupo3/regras.js";
-import { especialidade, horario, idParam, usuarioId } from "../../grupo3/validacao.js";
+import { horario, horarioFim, idParam, usuarioId, uuid } from "../../grupo3/validacao.js";
+import { exigirEspecialidadeAtiva } from "./especialidades.js";
 
 const router = Router();
 
@@ -26,7 +27,7 @@ const corpo = z.object({
   vinculo,
   cargo: opcional(z.string().trim().min(2).max(120)),
   setor: opcional(z.string().trim().min(2).max(120)),
-  especialidade: opcional(especialidade),
+  especialidadeId: opcional(uuid),
   registroProfissional: opcional(z.string().trim().min(2).max(60)),
   email: opcional(z.string().trim().toLowerCase().email("E-mail inválido.").max(160)),
   telefone: opcional(z.string().trim().regex(/^[0-9 ()+-]{8,20}$/, "Telefone inválido.")),
@@ -34,10 +35,12 @@ const corpo = z.object({
 });
 
 const selectSql = `
-  SELECT c.id, c.nome, c.vinculo::text AS vinculo, c.status::text AS status, c.cargo, c.setor, c.especialidade,
+  SELECT c.id, c.nome, c.vinculo::text AS vinculo, c.status::text AS status, c.cargo, c.setor,
+         c.especialidade_id, es.nome AS especialidade_nome,
          c.registro_profissional, c.email, c.telefone, c.criado_em, c.atualizado_em,
          u.id AS usuario_id, u.name AS usuario_nome
   FROM grupo3.colaborador c
+  LEFT JOIN grupo3.especialidade es ON es.id = c.especialidade_id
   LEFT JOIN public.users u ON u.ref = c.usuario_ref
 `;
 
@@ -49,7 +52,7 @@ function paraColaborador(row) {
     status: row.status,
     cargo: row.cargo,
     setor: row.setor,
-    especialidade: row.especialidade,
+    especialidade: row.especialidade_id ? { id: row.especialidade_id, nome: row.especialidade_nome } : null,
     registroProfissional: row.registro_profissional,
     email: row.email,
     telefone: row.telefone,
@@ -78,7 +81,8 @@ async function refDoUsuario(db, id, ignorarColaboradorId = null) {
 
 // Auditoria sem contatos: só registra quais campos mudaram.
 function camposAlterados(anterior, novo) {
-  return Object.keys(novo).filter((campo) => campo !== "usuarioId" && (anterior[campo] ?? null) !== (novo[campo] ?? null));
+  const atual = { ...anterior, especialidadeId: anterior.especialidade?.id ?? null };
+  return Object.keys(novo).filter((campo) => campo !== "usuarioId" && (atual[campo] ?? null) !== (novo[campo] ?? null));
 }
 
 router.get(
@@ -88,18 +92,18 @@ router.get(
     vinculo: vinculo.optional(),
     status: status.optional(),
     setor: z.string().trim().min(1).max(120).optional(),
-    especialidade: especialidade.optional(),
+    especialidadeId: uuid.optional(),
     q: z.string().trim().min(1).max(80).optional(),
   }), "query"),
   asyncHandler(async (req, res) => {
-    const { page, limit, vinculo: v, status: s, setor, especialidade: esp, q } = req.query;
+    const { page, limit, vinculo: v, status: s, setor, especialidadeId: esp, q } = req.query;
     const rows = await prisma.$queryRawUnsafe(
       `${selectSql.replace("SELECT", "SELECT count(*) OVER()::int AS total,")}
        WHERE ($1::text IS NULL OR c.vinculo::text = $1)
          AND ($2::text IS NULL OR c.status::text = $2)
          AND ($3::text IS NULL OR c.nome ILIKE $3)
          AND ($4::text IS NULL OR lower(c.setor) = lower($4))
-         AND ($5::text IS NULL OR c.especialidade = $5)
+         AND ($5::uuid IS NULL OR c.especialidade_id = $5::uuid)
        ORDER BY lower(c.nome) LIMIT $6 OFFSET $7`,
       v ?? null, s ?? null, q ? likeTerm(q) : null, setor ?? null, esp ?? null, limit, (page - 1) * limit,
     );
@@ -129,15 +133,16 @@ router.post(
     const b = req.body;
     const colaborador = await prisma.$transaction(async (tx) => {
       const ref = await refDoUsuario(tx, b.usuarioId);
+      await exigirEspecialidadeAtiva(tx, b.especialidadeId);
       const rows = await tx.$queryRaw`
-        INSERT INTO grupo3.colaborador (nome, vinculo, cargo, setor, especialidade, registro_profissional, email, telefone, usuario_ref)
-        VALUES (${b.nome}, ${b.vinculo}::grupo3.vinculo_colaborador, ${b.cargo}, ${b.setor}, ${b.especialidade},
+        INSERT INTO grupo3.colaborador (nome, vinculo, cargo, setor, especialidade_id, registro_profissional, email, telefone, usuario_ref)
+        VALUES (${b.nome}, ${b.vinculo}::grupo3.vinculo_colaborador, ${b.cargo}, ${b.setor}, ${b.especialidadeId}::uuid,
                 ${b.registroProfissional}, ${b.email}, ${b.telefone}, ${ref}::uuid)
         RETURNING id
       `;
       await audit(tx, {
         userId: req.user.id, action: "colaborador.criar", entity: "grupo3.colaborador", entityId: rows[0].id,
-        payload: { resultado: "sucesso", vinculo: b.vinculo, especialidade: b.especialidade, usuarioId: b.usuarioId },
+        payload: { resultado: "sucesso", vinculo: b.vinculo, especialidadeId: b.especialidadeId, usuarioId: b.usuarioId },
       });
       return buscarColaborador(rows[0].id, tx);
     });
@@ -156,10 +161,11 @@ router.put(
       const atual = await buscarColaborador(req.params.id, tx);
       if (!atual) notFound("Colaborador não encontrado.");
       const ref = await refDoUsuario(tx, b.usuarioId, atual.id);
+      if (b.especialidadeId !== (atual.especialidade?.id ?? null)) await exigirEspecialidadeAtiva(tx, b.especialidadeId);
       await tx.$executeRaw`
         UPDATE grupo3.colaborador
         SET nome = ${b.nome}, vinculo = ${b.vinculo}::grupo3.vinculo_colaborador, cargo = ${b.cargo}, setor = ${b.setor},
-            especialidade = ${b.especialidade}, registro_profissional = ${b.registroProfissional},
+            especialidade_id = ${b.especialidadeId}::uuid, registro_profissional = ${b.registroProfissional},
             email = ${b.email}, telefone = ${b.telefone}, usuario_ref = ${ref}::uuid
         WHERE id = ${atual.id}::uuid
       `;
@@ -205,7 +211,7 @@ router.patch(
 const disponibilidade = z.object({
   diaSemana: z.number().int().min(1).max(7),
   horaInicio: horario,
-  horaFim: horario,
+  horaFim: horarioFim,
   observacao: opcional(z.string().trim().min(1).max(300)),
 }).refine((d) => d.horaFim > d.horaInicio, { message: "O fim precisa ser depois do início.", path: ["horaFim"] });
 
