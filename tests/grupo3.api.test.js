@@ -1417,10 +1417,57 @@ describe("grupo3 · fisioterapia (US-075 a US-080)", () => {
       idosoId: "p16", tipoId: sessaoTipo, profissionalId: renata, inicio: "2025-03-05T09:00:00-03:00", planoFisioterapiaId: planoPassado,
     });
     await post("recepcao", `/api/agendamentos/${cancelada.body.id}/cancelar`, { motivo: "Idoso com febre" });
-    assert.equal((await post("fisio", `/api/fisioterapia/atividades/${ativ}/execucoes`, { agendamentoId: cancelada.body.id, status: "realizada" })).status, 409);
-    const lista = await get("fisio", `/api/fisioterapia/planos/${planoPassado}/execucoes`);
+    const naCancelada = await post("fisio", `/api/fisioterapia/atividades/${ativ}/execucoes`, { agendamentoId: cancelada.body.id, status: "realizada" });
+    assert.equal(naCancelada.status, 422);
+    assert.match(naCancelada.body.error.details[0].message, /cancelada ou não realizada/);
+    const naoRealizada = await post("recepcao", "/api/agendamentos", {
+      idosoId: "p16", tipoId: sessaoTipo, profissionalId: renata, inicio: "2025-03-07T09:00:00-03:00", planoFisioterapiaId: planoPassado,
+    });
+    await post("recepcao", `/api/agendamentos/${naoRealizada.body.id}/realizacao`, { status: "nao_realizado", observacao: "Recusou" });
+    assert.equal((await post("fisio", `/api/fisioterapia/atividades/${ativ}/execucoes`, { agendamentoId: naoRealizada.body.id, status: "realizada" })).status, 422);
+    const realizada = await post("recepcao", "/api/agendamentos", {
+      idosoId: "p16", tipoId: sessaoTipo, profissionalId: renata, inicio: "2025-03-10T09:00:00-03:00", planoFisioterapiaId: planoPassado,
+    });
+    await post("recepcao", `/api/agendamentos/${realizada.body.id}/realizacao`, { status: "realizado" });
+    assert.equal((await post("fisio", `/api/fisioterapia/atividades/${ativ}/execucoes`, { agendamentoId: realizada.body.id, status: "realizada" })).status, 201);
+    const daquiA = (minutos) => new Date(Date.now() + minutos * 60_000).toISOString();
+    const outroFisio = (await post("gestor", "/api/colaboradores", { nome: "Fisioterapeuta de tolerância", vinculo: "funcionario" })).body.id;
+    const naTolerancia = await post("recepcao", "/api/agendamentos", {
+      idosoId: "p16", tipoId: sessaoTipo, profissionalId: outroFisio, inicio: daquiA(30), planoFisioterapiaId: planoPassado,
+    });
+    assert.equal(naTolerancia.status, 201);
+    assert.equal((await post("fisio", `/api/fisioterapia/atividades/${ativ}/execucoes`, { agendamentoId: naTolerancia.body.id, status: "realizada" })).status, 201);
+    const cedoDemais = await post("recepcao", "/api/agendamentos", {
+      idosoId: "p16", tipoId: sessaoTipo, profissionalId: outroFisio, inicio: daquiA(300), planoFisioterapiaId: planoPassado,
+    });
+    assert.equal(cedoDemais.status, 201);
+    assert.equal((await post("fisio", `/api/fisioterapia/atividades/${ativ}/execucoes`, { agendamentoId: cedoDemais.body.id, status: "realizada" })).status, 422);
+    const lista = await get("fisio", `/api/fisioterapia/planos/${planoPassado}/execucoes?agendamentoId=${sessaoFeita.body.id}`);
     assert.equal(lista.body.data.length, 1);
     assert.equal(lista.body.data[0].status, "parcial");
+
+    // Correção: só fisioterapia.administrar, com motivo, trilha imutável; UPDATE direto segue bloqueado.
+    const execId = execucao.body.id;
+    assert.equal((await post("fisio", `/api/fisioterapia/execucoes/${execId}/corrigir`, { status: "realizada", motivo: "Lançada errado" })).status, 403);
+    assert.equal((await post("gestor", `/api/fisioterapia/execucoes/${execId}/corrigir`, { status: "realizada" })).status, 422);
+    assert.equal((await post("gestor", `/api/fisioterapia/execucoes/${execId}/corrigir`, { status: "parcial", motivo: "Sem mudança" })).status, 422);
+    const corrigida = await post("gestor", `/api/fisioterapia/execucoes/${execId}/corrigir`, { status: "realizada", observacoes: null, motivo: "Lançada como parcial por engano" });
+    assert.equal(corrigida.status, 200);
+    assert.equal(corrigida.body.status, "realizada");
+    assert.equal(corrigida.body.observacoes, null);
+    assert.equal(corrigida.body.correcoes.length, 1);
+    assert.deepEqual(corrigida.body.correcoes[0].anterior, { status: "parcial", profissionalId: renata, observacoes: "Dor ao final." });
+    assert.equal(corrigida.body.correcoes[0].novo.status, "realizada");
+    assert.equal(corrigida.body.correcoes[0].autor.id, "s02");
+    const lida = await get("fisio", `/api/fisioterapia/execucoes/${execId}`);
+    assert.equal(lida.body.correcoes[0].motivo, "Lançada como parcial por engano");
+    await assert.rejects(prisma.$executeRaw`UPDATE grupo3.execucao_atividade SET status = 'parcial' WHERE id = ${execId}::uuid`);
+    await assert.rejects(prisma.$executeRaw`DELETE FROM grupo3.execucao_atividade WHERE id = ${execId}::uuid`);
+    await assert.rejects(prisma.$executeRaw`UPDATE grupo3.correcao_execucao_atividade SET motivo = 'x' WHERE execucao_id = ${execId}::uuid`);
+    await assert.rejects(prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT set_config('grupo3.correcao_execucao', 'on', true)`;
+      await tx.$executeRaw`UPDATE grupo3.execucao_atividade SET registrado_em = now() WHERE id = ${execId}::uuid`;
+    }));
   });
 
   it("US-078: evolução cronológica, imutável, publicada só com evolucao.create", async () => {
@@ -1485,9 +1532,13 @@ describe("grupo3 · fisioterapia (US-075 a US-080)", () => {
     assert.equal(setembro.body.sessoes.previstas, 1);
     assert.equal(setembro.body.sessoes.canceladas, 1);
     const marco = await get("gestor", "/api/fisioterapia/indicadores?inicio=2025-03-01&fim=2025-03-31");
-    assert.equal(marco.body.sessoes.previstas, 1);
-    assert.equal(marco.body.sessoes.realizadas, 0);
-    assert.equal(marco.body.sessoes.taxaRealizacao, null);
+    assert.equal(marco.body.sessoes.previstas, 3);
+    assert.equal(marco.body.sessoes.realizadas, 1);
+    assert.equal(marco.body.sessoes.naoRealizadas, 1);
+    assert.equal(marco.body.sessoes.canceladas, 1);
+    assert.equal(marco.body.sessoes.taxaRealizacao, 50);
+    const vazio = await get("gestor", "/api/fisioterapia/indicadores?inicio=2024-01-01&fim=2024-01-31");
+    assert.equal(vazio.body.sessoes.taxaRealizacao, null);
     assert.equal((await get("recepcao", "/api/fisioterapia/indicadores")).status, 403);
   });
 });

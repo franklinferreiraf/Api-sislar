@@ -1095,7 +1095,33 @@ export const pathsGrupo3 = {
         status: "realizada", observacoes: "Sem dor.", registradoEm: "2026-11-10T17:45:00.000Z", registradoPor: { id: "s06", nome: "Renata Gouveia" },
       },
       conflictExample: erro("Esta atividade já foi registrada nesta sessão."),
-      description: "Sempre dentro de uma sessão: uma execução por atividade e sessão (409). A sessão precisa estar ligada ao plano da atividade (422), não cancelada nem não realizada (409) e já iniciada, respeitando a tolerância do tipo (422). Execução é imutável.",
+      description: "Sempre dentro de uma sessão: uma execução por atividade e sessão (409). A sessão precisa estar ligada ao plano da atividade (422) e ser `realizado`, ou `agendado` já dentro da tolerância do tipo; sessão `cancelado` ou `nao_realizado` é 422. Execução é imutável; correção por `POST /api/fisioterapia/execucoes/{id}/corrigir`.",
+    }),
+  },
+  "/api/fisioterapia/execucoes/{id}": {
+    get: op("G3 · Fisioterapia", "Detalhe da execução (com correções)", "fisioterapia.visualizar", {
+      params: [path("id")], errors: [404], description: leituraAuditada,
+    }),
+  },
+  "/api/fisioterapia/execucoes/{id}/corrigir": {
+    post: op("G3 · Fisioterapia", "Corrigir execução de atividade", "fisioterapia.administrar", {
+      params: [path("id")],
+      body: {
+        type: "object", required: ["motivo"],
+        properties: {
+          motivo: { type: "string", minLength: 3, maxLength: 1000 },
+          status: { type: "string", enum: ["realizada", "parcial", "nao_realizada"] },
+          profissionalId: uuid,
+          observacoes: { type: "string", maxLength: 2000, nullable: true },
+        },
+      },
+      bodyExample: { status: "realizada", motivo: "Lançada como parcial por engano" },
+      errors: [404],
+      example: {
+        id: "7a8b9c0d-1e2f-4a3b-c4d5-e6f7a8b9c0d1", status: "realizada",
+        correcoes: [{ id: "c1", anterior: { status: "parcial", profissionalId: exemploColaborador.id, observacoes: "Dor ao final." }, novo: { status: "realizada", profissionalId: exemploColaborador.id, observacoes: "Dor ao final." }, motivo: "Lançada como parcial por engano", em: "2026-11-11T10:00:00.000Z", autor: { id: "s02", nome: "Ricardo Almeida Teixeira" } }],
+      },
+      description: "Troca status, profissional e observações, com motivo obrigatório; grava anterior → novo em trilha imutável. Mesmo padrão de `corrigir-realizacao`: o banco só aceita a alteração com uma flag local da transação. 422 sem motivo ou sem mudança real.",
     }),
   },
   "/api/fisioterapia/planos/{id}/execucoes": {

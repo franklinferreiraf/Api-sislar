@@ -491,7 +491,36 @@ CREATE TABLE execucao_atividade (
   UNIQUE (agendamento_id, atividade_id)
 );
 CREATE INDEX indice_execucao_atividade ON execucao_atividade (atividade_id, registrado_em);
+
+-- Execução é imutável. Única exceção: POST /fisioterapia/execucoes/{id}/corrigir, que liga
+-- grupo3.correcao_execucao na transação (set_config local) e só pode trocar status, profissional e observações.
+CREATE FUNCTION proteger_execucao_atividade() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'Execução de atividade não pode ser excluída.';
+  END IF;
+  IF coalesce(current_setting('grupo3.correcao_execucao', true), '') <> 'on'
+     OR (NEW.agendamento_id, NEW.atividade_id, NEW.registrado_por_ref, NEW.registrado_em)
+        IS DISTINCT FROM (OLD.agendamento_id, OLD.atividade_id, OLD.registrado_por_ref, OLD.registrado_em) THEN
+    RAISE EXCEPTION 'Execução de atividade não pode ser alterada; use a correção.';
+  END IF;
+  RETURN NEW;
+END $$;
 CREATE TRIGGER preservar_execucao_atividade BEFORE UPDATE OR DELETE ON execucao_atividade
+  FOR EACH ROW EXECUTE FUNCTION proteger_execucao_atividade();
+
+-- Trilha imutável das correções de execução.
+CREATE TABLE correcao_execucao_atividade (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  execucao_id uuid NOT NULL REFERENCES execucao_atividade(id),
+  anterior jsonb NOT NULL,
+  novo jsonb NOT NULL,
+  motivo text NOT NULL CHECK (char_length(btrim(motivo)) BETWEEN 3 AND 1000),
+  autor_ref uuid NOT NULL,
+  em timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX indice_correcao_execucao ON correcao_execucao_atividade (execucao_id, em);
+CREATE TRIGGER preservar_correcao_execucao BEFORE UPDATE OR DELETE ON correcao_execucao_atividade
   FOR EACH ROW EXECUTE FUNCTION impedir_alteracao_historico();
 
 -- Evolução do plano (US-078): linha cronológica imutável. Publicada no prontuário se o autor tem

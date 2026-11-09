@@ -357,9 +357,12 @@ router.post(
       if (!sessao) throw erroCampo("agendamentoId", "Sessão não encontrada.");
       if (sessao.categoria !== "fisioterapia") throw erroCampo("agendamentoId", "O agendamento não é sessão de fisioterapia.");
       if (sessao.plano_fisioterapia_id !== atividade.plano_id) throw erroCampo("agendamentoId", "A sessão não está ligada ao plano desta atividade.");
-      if (["cancelado", "nao_realizado"].includes(sessao.status)) throw new HttpError(409, "Sessão cancelada ou não realizada.");
-      if (!podeRegistrarRealizacao(sessao.inicio, sessao.tolerancia_realizacao_min)) {
-        throw erroCampo("agendamentoId", "A sessão ainda não começou.");
+      // Só sessão realizada, ou agendada já dentro da tolerância do tipo.
+      if (["cancelado", "nao_realizado"].includes(sessao.status)) {
+        throw erroCampo("agendamentoId", "Sessão cancelada ou não realizada não recebe execução de atividade.");
+      }
+      if (sessao.status === "agendado" && !podeRegistrarRealizacao(sessao.inicio, sessao.tolerancia_realizacao_min)) {
+        throw erroCampo("agendamentoId", `A sessão ainda não começou (tolerância de ${sessao.tolerancia_realizacao_min} min).`);
       }
       const profissionalId = b.profissionalId ?? sessao.profissional_id;
       if (b.profissionalId) {
@@ -384,6 +387,87 @@ router.post(
     });
     const rows = await prisma.$queryRawUnsafe(`${selectExecucao} WHERE e.id = $1::uuid`, id);
     res.status(201).json(paraExecucao(rows[0]));
+  }),
+);
+
+async function correcoesDaExecucao(execucaoId, db = prisma) {
+  const rows = await db.$queryRaw`
+    SELECT c.id, c.anterior, c.novo, c.motivo, c.em, u.id AS autor_id, u.name AS autor_nome
+    FROM grupo3.correcao_execucao_atividade c LEFT JOIN public.users u ON u.ref = c.autor_ref
+    WHERE c.execucao_id = ${execucaoId}::uuid ORDER BY c.em, c.id
+  `;
+  return rows.map((row) => ({
+    id: row.id, anterior: row.anterior, novo: row.novo, motivo: row.motivo, em: row.em,
+    autor: row.autor_id ? { id: row.autor_id, nome: row.autor_nome } : null,
+  }));
+}
+
+async function execucaoVisivel(req, id, db = prisma) {
+  const rows = await db.$queryRawUnsafe(`${selectExecucao} WHERE e.id = $1::uuid`, id);
+  if (!rows[0]) notFound("Execução não encontrada.");
+  const plano = await planoVisivel(req, rows[0].plano_id, db);
+  return { execucao: paraExecucao(rows[0]), plano };
+}
+
+router.get("/fisioterapia/execucoes/:id", requirePerm(VER), validate(idParam, "params"), asyncHandler(async (req, res) => {
+  const { execucao, plano } = await execucaoVisivel(req, req.params.id);
+  await auditarLeitura(req, { entidade: "execucao_atividade", rota: "/fisioterapia/execucoes/:id", idosoIds: [plano.idoso?.id], ids: [execucao.id] });
+  res.json({ ...execucao, correcoes: await correcoesDaExecucao(execucao.id) });
+}));
+
+// Correção de execução: só administração da fisioterapia, com motivo; anterior -> novo em trilha imutável.
+// O gatilho do banco só aceita a alteração com grupo3.correcao_execucao ligado nesta transação.
+router.post(
+  "/fisioterapia/execucoes/:id/corrigir",
+  requirePerm(ADMIN),
+  validate(idParam, "params"),
+  validate(z.object({
+    motivo: z.string().trim().min(3, "Informe o motivo com ao menos 3 caracteres.").max(1000),
+    status: z.enum(["realizada", "parcial", "nao_realizada"]).optional(),
+    profissionalId: uuid.optional(),
+    observacoes: z.string().trim().min(1).max(2000).nullable().optional(),
+  })),
+  asyncHandler(async (req, res) => {
+    const b = req.body;
+    await prisma.$transaction(async (tx) => {
+      const atual = (await tx.$queryRaw`
+        SELECT id, status::text AS status, profissional_id, observacoes FROM grupo3.execucao_atividade
+        WHERE id = ${req.params.id}::uuid FOR UPDATE
+      `)[0];
+      if (!atual) notFound("Execução não encontrada.");
+      const { plano } = await execucaoVisivel(req, atual.id, tx);
+      if (b.profissionalId) {
+        const existe = await tx.$queryRaw`SELECT 1 FROM grupo3.colaborador WHERE id = ${b.profissionalId}::uuid`;
+        if (!existe.length) throw erroCampo("profissionalId", "Profissional não encontrado.");
+      }
+      const anterior = { status: atual.status, profissionalId: atual.profissional_id, observacoes: atual.observacoes };
+      const novo = {
+        status: b.status ?? anterior.status,
+        profissionalId: b.profissionalId ?? anterior.profissionalId,
+        observacoes: b.observacoes !== undefined ? b.observacoes : anterior.observacoes,
+      };
+      if (Object.keys(novo).every((campo) => novo[campo] === anterior[campo])) {
+        throw erroCampo("status", "Informe ao menos um campo diferente do registro atual.");
+      }
+      await tx.$queryRaw`SELECT set_config('grupo3.correcao_execucao', 'on', true)`;
+      await tx.$executeRaw`
+        UPDATE grupo3.execucao_atividade
+        SET status = ${novo.status}::grupo3.status_execucao_atividade, profissional_id = ${novo.profissionalId}::uuid,
+            observacoes = ${novo.observacoes}
+        WHERE id = ${atual.id}::uuid
+      `;
+      await tx.$queryRaw`SELECT set_config('grupo3.correcao_execucao', 'off', true)`;
+      await tx.$executeRaw`
+        INSERT INTO grupo3.correcao_execucao_atividade (execucao_id, anterior, novo, motivo, autor_ref)
+        VALUES (${atual.id}::uuid, ${JSON.stringify(anterior)}::jsonb, ${JSON.stringify(novo)}::jsonb, ${b.motivo}, ${req.user.ref}::uuid)
+      `;
+      await audit(tx, {
+        userId: req.user.id, action: "execucao_atividade.corrigir", entity: "grupo3.execucao_atividade", entityId: atual.id,
+        payload: { resultado: "sucesso", idosoId: plano.idoso?.id, status: { anterior: anterior.status, novo: novo.status } },
+      });
+    });
+    const { execucao } = await execucaoVisivel(req, req.params.id);
+    res.json({ ...execucao, correcoes: await correcoesDaExecucao(execucao.id) });
   }),
 );
 
