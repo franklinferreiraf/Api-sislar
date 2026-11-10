@@ -443,8 +443,8 @@ const exemploTarefa = {
   atualizadoEm: "2026-11-09T12:00:00.000Z",
 };
 const historicoTarefa = [
-  { id: "h1", statusAnterior: null, statusNovo: "pendente", observacao: "Tarefa criada.", em: "2026-11-09T12:00:00.000Z", autor: { id: "s02", nome: "Ricardo Almeida Teixeira" } },
-  { id: "h2", statusAnterior: "pendente", statusNovo: "em_andamento", observacao: "Comecei hoje.", em: "2026-11-10T11:00:00.000Z", autor: { id: "s06", nome: "Renata Gouveia" } },
+  { id: "h1", evento: "criada", statusAnterior: null, statusNovo: "pendente", observacao: "Tarefa criada.", em: "2026-11-09T12:00:00.000Z", autor: { id: "s02", nome: "Ricardo Almeida Teixeira" } },
+  { id: "h2", evento: "status", statusAnterior: "pendente", statusNovo: "em_andamento", observacao: "Comecei hoje.", em: "2026-11-10T11:00:00.000Z", autor: { id: "s06", nome: "Renata Gouveia" } },
 ];
 const corpoTarefa = {
   type: "object",
@@ -1279,7 +1279,24 @@ export const pathsGrupo3 = {
       errors: [404],
       example: { ...exemploTarefa, status: "em_andamento", historico: historicoTarefa },
       conflictExample: erro("Tarefa já concluida."),
-      description: "Só o responsável (usuário vinculado ao colaborador responsável) ou quem tem `tarefas.administrar` (403). Grava `concluidaEm` ao concluir e uma linha no histórico imutável. Concluída e cancelada são finais (409); mesmo status é 422.",
+      description: "Só o responsável (usuário vinculado ao colaborador responsável) ou quem tem `tarefas.administrar` (403). Grava `concluidaEm` ao concluir e uma linha no histórico imutável. Concluída e cancelada são finais (409; use `reabrir`); mesmo status é 422.",
+    }),
+  },
+  "/api/tarefas/{id}/reabrir": {
+    post: op("G3 · Tarefas", "Reabrir tarefa concluída ou cancelada", "tarefas.administrar", {
+      params: [path("id")],
+      body: {
+        type: "object", required: ["motivo"],
+        properties: { motivo: { type: "string", minLength: 3, maxLength: 1000 }, prazo: { ...dataHora, description: "Novo prazo (opcional)." } },
+      },
+      bodyExample: { motivo: "Faltou conferir o segundo andar", prazo: "2026-11-14T18:00:00-03:00" },
+      errors: [404],
+      example: {
+        ...exemploTarefa, historico: [...historicoTarefa,
+          { id: "h3", evento: "reaberta", statusAnterior: "concluida", statusNovo: "pendente", observacao: "Faltou conferir o segundo andar", em: "2026-11-11T12:00:00.000Z", autor: { id: "s02", nome: "Ricardo Almeida Teixeira" } }],
+      },
+      conflictExample: erro("Só tarefa concluída ou cancelada pode ser reaberta."),
+      description: "Volta a tarefa para `pendente`, limpa `concluidaEm` e, se informado, troca o prazo. Grava o evento `reaberta` no histórico imutável, com autor, data e motivo. O banco só aceita a mudança com uma flag local da transação. 422 sem motivo.",
     }),
   },
   "/api/indicadores/atendimentos": {

@@ -1596,6 +1596,35 @@ describe("grupo3 · tarefas (US-094 a US-096)", () => {
     await assert.rejects(prisma.$executeRaw`DELETE FROM grupo3.tarefa WHERE id = ${tarefa}::uuid`);
   });
 
+  it("reabrir: só tarefas.administrar, com motivo, e registra \"reaberta\" no histórico", async () => {
+    const criada = await post("gestor", "/api/tarefas", { titulo: "Tarefa para reabrir", responsavelId: renata, prazo: daquiA(24) });
+    const url = `/api/tarefas/${criada.body.id}/reabrir`;
+    assert.equal((await post("gestor", url, { motivo: "Ainda aberta" })).status, 409);
+    await patch("fisio", `/api/tarefas/${criada.body.id}/status`, { status: "concluida" });
+    assert.equal((await post("fisio", url, { motivo: "Faltou etapa" })).status, 403);
+    assert.equal((await post("enfermagem", url, { motivo: "Faltou etapa" })).status, 403);
+    assert.equal((await post("gestor", url, {})).status, 422);
+    assert.equal((await post("gestor", url, { motivo: "ok" })).status, 422);
+    const reaberta = await post("gestor", url, { motivo: "Faltou conferir o segundo andar", prazo: daquiA(72) });
+    assert.equal(reaberta.status, 200);
+    assert.equal(reaberta.body.status, "pendente");
+    assert.equal(reaberta.body.concluidaEm, null);
+    const ultimo = reaberta.body.historico.at(-1);
+    assert.equal(ultimo.evento, "reaberta");
+    assert.equal(ultimo.statusAnterior, "concluida");
+    assert.equal(ultimo.statusNovo, "pendente");
+    assert.equal(ultimo.observacao, "Faltou conferir o segundo andar");
+    assert.equal(ultimo.autor.id, "s02");
+    assert.ok(ultimo.em);
+    assert.deepEqual(reaberta.body.historico.map((h) => h.evento), ["criada", "status", "reaberta"]);
+    await patch("fisio", `/api/tarefas/${criada.body.id}/status`, { status: "cancelada" });
+    await assert.rejects(prisma.$executeRaw`UPDATE grupo3.tarefa SET status = 'pendente', concluida_em = NULL WHERE id = ${criada.body.id}::uuid`);
+    await assert.rejects(prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT set_config('grupo3.reabertura_tarefa', 'on', true)`;
+      await tx.$executeRaw`UPDATE grupo3.tarefa SET status = 'pendente', titulo = 'outro' WHERE id = ${criada.body.id}::uuid`;
+    }));
+  });
+
   it("só quem criou (ou a administração) edita os dados da tarefa", async () => {
     const outra = await post("enfermagem", "/api/tarefas", { titulo: "Revisar lista de chamada", responsavelId: renata, prazo: daquiA(24) });
     const corpo = { titulo: "Revisar lista de chamada (manhã)", responsavelId: renata, prazo: daquiA(30), prioridade: "baixa" };
@@ -1625,16 +1654,43 @@ describe("grupo3 · jobs de alerta sem repetição (T-008)", () => {
     const vencida = await post("gestor", "/api/tarefas", {
       titulo: "Tarefa vencida para alerta", responsavelId: renata, prazo: new Date(Date.now() - 3_600_000).toISOString(),
     });
-    const semUsuario = (await post("gestor", "/api/colaboradores", { nome: "Responsável sem login", vinculo: "externo" })).body.id;
-    await post("gestor", "/api/tarefas", { titulo: "Tarefa vencida sem destinatário", responsavelId: semUsuario, prazo: new Date(Date.now() - 3_600_000).toISOString() });
     const primeira = await processarTarefasAtrasadas();
     const segunda = await processarTarefasAtrasadas();
     assert.ok(primeira.notificadas >= 1);
-    assert.ok(primeira.semDestinatario >= 1);
     assert.equal(segunda.processados, 0);
     const avisos = (await notificacoesDe("s06", "tarefa")).filter((n) => n.link === `/tarefas/${vencida.body.id}`);
     assert.equal(avisos.length, 1);
     assert.match(avisos[0].body, /Tarefa vencida para alerta/);
+  });
+
+  it("responsável sem usuário: avisa quem criou, uma vez; ao vincular usuário, avisa o responsável", async () => {
+    const semLogin = (await post("gestor", "/api/colaboradores", { nome: "Responsável sem login", vinculo: "externo" })).body.id;
+    const vencida = await post("enfermagem", "/api/tarefas", {
+      titulo: "Tarefa de quem não tem login", responsavelId: semLogin, prazo: new Date(Date.now() - 7_200_000).toISOString(),
+    });
+    const link = `/tarefas/${vencida.body.id}`;
+    const r1 = await processarTarefasAtrasadas();
+    await processarTarefasAtrasadas();
+    assert.ok(r1.notificadasAoCriador >= 1);
+    const aoCriador = (await notificacoesDe("s03", "tarefa")).filter((n) => n.link === link);
+    assert.equal(aoCriador.length, 1);
+    assert.match(aoCriador[0].body, /não tem acesso ao sistema/);
+
+    const vinculo = await put("gestor", `/api/colaboradores/${semLogin}`, { nome: "Responsável sem login", vinculo: "externo", usuarioId: "s12" });
+    assert.equal(vinculo.status, 200);
+    const r2 = await processarTarefasAtrasadas();
+    const r3 = await processarTarefasAtrasadas();
+    assert.ok(r2.notificadas >= 1);
+    assert.equal(r3.processados, 0);
+    assert.equal((await notificacoesDe("s12", "tarefa")).filter((n) => n.link === link).length, 1);
+    assert.equal((await notificacoesDe("s03", "tarefa")).filter((n) => n.link === link).length, 1);
+
+    const concluidaAntes = await post("enfermagem", "/api/tarefas", {
+      titulo: "Concluída antes do vínculo", responsavelId: semLogin, prazo: new Date(Date.now() - 7_200_000).toISOString(),
+    });
+    await patch("gestor", `/api/tarefas/${concluidaAntes.body.id}/status`, { status: "concluida" });
+    await processarTarefasAtrasadas();
+    assert.equal((await notificacoesDe("s12", "tarefa")).filter((n) => n.link === `/tarefas/${concluidaAntes.body.id}`).length, 0);
   });
 
   it("pendência odontológica: resumo sem nomes, só para atendimento-clinico.administrar, uma vez por idoso no ciclo", async () => {

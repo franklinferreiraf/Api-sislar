@@ -11,45 +11,66 @@ async function configuracao(db, chave, padrao) {
 }
 
 /**
- * Uma notificação por tarefa atrasada, para o usuário do responsável. Responsável sem usuário (ou com
- * usuário inativo) também é registrado, como "sem_destinatario", para não tentar a cada rodada.
+ * Tarefas atrasadas: uma notificação por tarefa para o responsável (usuário do colaborador). Se o responsável
+ * não tem usuário ativo, avisa uma vez quem criou a tarefa. A chave do responsável só é gravada quando o aviso
+ * sai: ao vincular um usuário ao colaborador, a próxima rodada avisa o responsável das tarefas que continuam
+ * abertas e atrasadas (mesmo comportamento dos lembretes).
  */
 export async function processarTarefasAtrasadas({ agora = new Date(), limite = 100, enviar = enviarNotificacao } = {}) {
-  const resumo = { processados: 0, notificadas: 0, semDestinatario: 0, falhas: 0 };
+  const resumo = { processados: 0, notificadas: 0, notificadasAoCriador: 0, semDestinatario: 0, falhas: 0 };
   await prisma.$transaction(async (tx) => {
     const fuso = await configuracao(tx, "fuso_horario", "America/Sao_Paulo");
     const tarefas = await tx.$queryRaw`
-      SELECT t.id, t.titulo, t.prazo, u.id AS usuario_id, u.active AS usuario_ativo
+      SELECT t.id, t.titulo, t.prazo, c.nome AS responsavel_nome,
+             (u.id IS NOT NULL AND u.active) AS responsavel_tem_usuario, u.id AS usuario_id,
+             (cr.id IS NOT NULL AND cr.active) AS criador_ativo, cr.id AS criador_id
       FROM grupo3.tarefa t
       JOIN grupo3.colaborador c ON c.id = t.responsavel_id
       LEFT JOIN public.users u ON u.ref = c.usuario_ref
+      LEFT JOIN public.users cr ON cr.ref = t.criado_por_ref
       WHERE t.status IN ('pendente','em_andamento') AND t.prazo < ${agora}
-        AND NOT EXISTS (SELECT 1 FROM grupo3.notificacao_controle n WHERE n.chave = 'tarefa_atrasada:' || t.id::text)
+        AND (
+          (u.id IS NOT NULL AND u.active AND NOT EXISTS (
+            SELECT 1 FROM grupo3.notificacao_controle n WHERE n.chave = 'tarefa_atrasada:' || t.id::text))
+          OR (NOT (u.id IS NOT NULL AND u.active) AND NOT EXISTS (
+            SELECT 1 FROM grupo3.notificacao_controle n WHERE n.chave = 'tarefa_atrasada_criador:' || t.id::text))
+        )
       ORDER BY t.prazo
       LIMIT ${limite}
       FOR UPDATE OF t SKIP LOCKED
     `;
     for (const tarefa of tarefas) {
       resumo.processados += 1;
-      const temDestinatario = Boolean(tarefa.usuario_id && tarefa.usuario_ativo);
+      const prazo = new Intl.DateTimeFormat("pt-BR", { timeZone: fuso, dateStyle: "short", timeStyle: "short" }).format(tarefa.prazo);
+      const paraResponsavel = tarefa.responsavel_tem_usuario;
+      const destinatario = paraResponsavel ? tarefa.usuario_id : (tarefa.criador_ativo ? tarefa.criador_id : null);
+      const chave = paraResponsavel ? `tarefa_atrasada:${tarefa.id}` : `tarefa_atrasada_criador:${tarefa.id}`;
+      const tipo = paraResponsavel ? "tarefa_atrasada" : "tarefa_atrasada_criador";
       await tx.$executeRawUnsafe("SAVEPOINT alerta_tarefa");
       try {
         const marcada = await tx.$queryRaw`
           INSERT INTO grupo3.notificacao_controle (chave, tipo, status, destinatarios)
-          VALUES (${`tarefa_atrasada:${tarefa.id}`}, 'tarefa_atrasada', ${temDestinatario ? "enviada" : "sem_destinatario"}, ${temDestinatario ? 1 : 0})
+          VALUES (${chave}, ${tipo}, ${destinatario ? "enviada" : "sem_destinatario"}, ${destinatario ? 1 : 0})
           ON CONFLICT (chave) DO NOTHING
           RETURNING chave
         `;
-        if (marcada.length && temDestinatario) {
-          const prazo = new Intl.DateTimeFormat("pt-BR", { timeZone: fuso, dateStyle: "short", timeStyle: "short" }).format(tarefa.prazo);
+        if (marcada.length && destinatario) {
           await enviar({
-            usuarioId: tarefa.usuario_id, tipo: "tarefa", titulo: "Tarefa atrasada",
-            corpo: `"${tarefa.titulo}" passou do prazo (${prazo}).`, link: `/tarefas/${tarefa.id}`,
+            usuarioId: destinatario,
+            tipo: "tarefa",
+            titulo: "Tarefa atrasada",
+            corpo: paraResponsavel
+              ? `"${tarefa.titulo}" passou do prazo (${prazo}).`
+              : `"${tarefa.titulo}" passou do prazo (${prazo}). O responsável (${tarefa.responsavel_nome}) não tem acesso ao sistema.`,
+            link: `/tarefas/${tarefa.id}`,
           }, tx);
         }
         await tx.$executeRawUnsafe("RELEASE SAVEPOINT alerta_tarefa");
-        if (marcada.length) resumo[temDestinatario ? "notificadas" : "semDestinatario"] += 1;
-      } catch (error) {
+        if (marcada.length) {
+          if (!destinatario) resumo.semDestinatario += 1;
+          else resumo[paraResponsavel ? "notificadas" : "notificadasAoCriador"] += 1;
+        }
+      } catch {
         // Sem marcação: tenta de novo na próxima rodada.
         await tx.$executeRawUnsafe("ROLLBACK TO SAVEPOINT alerta_tarefa");
         resumo.falhas += 1;

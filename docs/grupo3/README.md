@@ -249,6 +249,7 @@ erDiagram
     HISTORICO_TAREFA {
         uuid id PK
         uuid tarefa_id FK
+        text evento "criada | status | reaberta"
         enum status_anterior
         enum status_novo
         text observacao
@@ -256,7 +257,7 @@ erDiagram
         timestamptz em
     }
     NOTIFICACAO_CONTROLE {
-        text chave PK "tarefa_atrasada:<id> | odonto_pendente:<ciclo>:<idoso_ref>"
+        text chave PK "tarefa_atrasada[_criador]:<id> | odonto_pendente:<ciclo>:<idoso_ref>"
         text tipo
         text status "enviada | sem_destinatario"
         int destinatarios
@@ -361,10 +362,10 @@ Integridade garantida no banco:
 
 **Fisioterapia (US-075 a US-080).** O **plano** tem objetivo, período, frequência semanal, observações, responsável e situação; um idoso pode ter **mais de um plano ativo**. As **atividades** têm descrição, frequência, duração, intensidade e `configuracao` flexível (jsonb validado), e são inativadas em vez de excluídas. A **sessão** é um agendamento de categoria `fisioterapia` com `planoFisioterapiaId` (FK opcional): o plano precisa ser do mesmo idoso e estar ativo, e sessão fora do período do plano é aceita com o aviso `fora_do_periodo_do_plano`. A **execução de atividade** fica sempre vinculada à sessão (`agendamento_id`), uma por atividade e sessão. Só é aceita em sessão `realizado`, ou `agendado` já dentro da tolerância do tipo; sessão `cancelado` ou `nao_realizado` é 422. É imutável: a correção é `POST /api/fisioterapia/execucoes/{id}/corrigir` (`fisioterapia.administrar`, motivo obrigatório), que grava anterior → novo em `correcao_execucao_atividade` (imutável) e usa a flag local `grupo3.correcao_execucao`, como `corrigir-realizacao`. A **evolução do plano** é uma linha cronológica imutável e segue a regra de publicação do registro clínico (publica só se o autor tem `evolucao.create`; senão `aguardando_permissao`, com `POST /api/fisioterapia/evolucoes/republicar-pendentes`). A **rotina semanal** mostra as sessões da semana e a carga por dia, contando só `agendado` e `realizado`; `programar-semana` cria as sessões de um plano de uma vez, com a mesma validação do agendamento e tudo ou nada. Os **indicadores** trazem planos ativos e vigentes, idosos em fisioterapia e sessões previstas, realizadas, não realizadas e canceladas.
 
-**Tarefas (US-094 a US-096).** Tarefa com título, descrição, responsável (colaborador ativo), prazo, prioridade (`baixa`, `media`, `alta`, `urgente`) e status (`pendente`, `em_andamento`, `concluida`, `cancelada`). O **status** pode ser alterado pelo **responsável** (o usuário vinculado ao colaborador, via `usuario_ref`) ou por quem tem `tarefas.administrar`; cada mudança grava autor, data e observação no **histórico imutável** (`historico_tarefa`) e `concluida_em` ao concluir. Concluída e cancelada são finais. **Atrasada é derivado** (prazo vencido e tarefa pendente ou em andamento), não é status gravado. Os dados da tarefa são editados por quem a criou ou por `tarefas.administrar`.
+**Tarefas (US-094 a US-096).** Tarefa com título, descrição, responsável (colaborador ativo), prazo, prioridade (`baixa`, `media`, `alta`, `urgente`) e status (`pendente`, `em_andamento`, `concluida`, `cancelada`). O **status** pode ser alterado pelo **responsável** (o usuário vinculado ao colaborador, via `usuario_ref`) ou por quem tem `tarefas.administrar`; cada mudança grava autor, data e observação no **histórico imutável** (`historico_tarefa`, com o evento `criada`, `status` ou `reaberta`) e `concluida_em` ao concluir. Concluída e cancelada são finais; só `POST /api/tarefas/{id}/reabrir` (`tarefas.administrar`, motivo obrigatório) as devolve a `pendente`, gravando o evento `reaberta` (o banco só aceita com a flag local `grupo3.reabertura_tarefa`). **Atrasada é derivado** (prazo vencido e tarefa pendente ou em andamento), não é status gravado. Os dados da tarefa são editados por quem a criou ou por `tarefas.administrar`.
 
 **Jobs de alerta (T-008).** Rodam no agendador (`JOBS_ENABLED=true`) e **não repetem notificação**: o que já foi avisado fica em `notificacao_controle`, com chave única.
-- **Tarefas atrasadas:** uma notificação por tarefa atrasada, para o usuário do responsável (`kind = "tarefa"`). Responsável sem usuário fica registrado como `sem_destinatario` e não é tentado de novo.
+- **Tarefas atrasadas:** uma notificação por tarefa atrasada, para o usuário do responsável (`kind = "tarefa"`, chave `tarefa_atrasada:<id>`, gravada só quando o aviso sai). Se o responsável não tem usuário ativo, avisa uma vez **quem criou a tarefa** (chave `tarefa_atrasada_criador:<id>`). Ao vincular um usuário ao colaborador, a rodada seguinte avisa o responsável das tarefas dele que continuam abertas e atrasadas, como nos lembretes.
 - **Pendências odontológicas:** um aviso por idoso por ciclo (chave `odonto_pendente:<ciclo>:<idoso_ref>`). A cada rodada com idosos ainda não avisados, sai **um resumo sem nomes** ("5 idosos sem avaliação odontológica no ciclo 2026-2", com link para `/odontologia/pendencias?ciclo=2026-2`) para cada usuário com `atendimento-clinico.administrar` (`kind = "odontologia"`). No modo `dias_corridos`, o "ciclo" do controle é o mês corrente.
 
 **Auditoria de leitura.** Ler registro clínico, acompanhamento odontológico, tratamento externo, pendências, plano, execuções e evoluções de fisioterapia grava `<entidade>.ler` no `audit_log`, com quem acessou (`user_id`), quando (`at`), quais idosos (`payload.idosos`), quais registros e a rota.
@@ -436,6 +437,7 @@ A documentação completa, com exemplos e erros, está em `/api/docs`.
 | `POST /api/tarefas` | `tarefas.criar` | 094 |
 | `PUT /api/tarefas/{id}` | `tarefas.criar` (quem criou) ou `tarefas.administrar` | 094 |
 | `PATCH /api/tarefas/{id}/status` | `tarefas.editar` (responsável) ou `tarefas.administrar` | 095 |
+| `POST /api/tarefas/{id}/reabrir` | `tarefas.administrar` | 095 |
 | `GET /api/indicadores/atendimentos` · `/tarefas` · `/equipe` | `modulo.dashboard` (proposta; pergunta ao G5) | 080, 096, 100, 119, 123, 128 |
 | `GET /api/especialidades` · `GET /api/especialidades/{id}` | `equipe.visualizar`, `equipe.administrar`, `agenda.visualizar`, `agenda.criar` ou `atendimento-clinico.visualizar` | 082, 084 |
 | `POST /api/especialidades` · `PUT /api/especialidades/{id}` · `PATCH /api/especialidades/{id}/status` | `equipe.administrar` | 082, 084 |
@@ -494,7 +496,7 @@ Usa a auditoria da Fundação (`public.audit_log`, via `audit()` em `src/db/help
 | `registro_clinico.criar` · `criar_finalizado` · `editar` · `finalizar` · `adendo` · `republicar` | Registro clínico |
 | `acompanhamento_odontologico.criar` · `editar` · `tratamento_externo.criar` · `editar` · `odontologia.configuracao_ciclo` | Atendimento odontológico e externo |
 | `plano_fisioterapia.criar` · `editar` · `atividade_fisioterapia.criar` · `editar` · `execucao_atividade.registrar` · `corrigir` · `evolucao_fisioterapia.registrar` · `republicar` | Fisioterapia |
-| `tarefa.criar` · `editar` · `status` | Tarefas (o histórico de status fica também em `historico_tarefa`) |
+| `tarefa.criar` · `editar` · `status` · `reabrir` | Tarefas (o histórico de status fica também em `historico_tarefa`) |
 | `registro_clinico.ler` · `acompanhamento_odontologico.ler` · `tratamento_externo.ler` · `odontologia_pendencias.ler` · `plano_fisioterapia.ler` · `execucao_atividade.ler` · `evolucao_fisioterapia.ler` | **Leitura** de dados clínicos: usuário, data/hora, idosos (`payload.idosos`), registros e rota |
 | `escala.criar` · `editar` · `situacao` | Alterações em escalas |
 | `escala.cobertura` | Substituição da cobertura mínima (com a versão anterior) |

@@ -172,8 +172,8 @@ export async function seedGrupo3(tx) {
       RETURNING id
     `)[0].id;
     await tx.$executeRaw`
-      INSERT INTO grupo3.historico_tarefa (tarefa_id, status_anterior, status_novo, observacao, autor_ref)
-      VALUES (${tarefa}::uuid, NULL, 'pendente', 'Tarefa criada.', ${gestorRef}::uuid)
+      INSERT INTO grupo3.historico_tarefa (tarefa_id, evento, status_anterior, status_novo, observacao, autor_ref)
+      VALUES (${tarefa}::uuid, 'criada', NULL, 'pendente', 'Tarefa criada.', ${gestorRef}::uuid)
     `;
     if (statusTarefa !== "pendente") {
       await tx.$executeRaw`

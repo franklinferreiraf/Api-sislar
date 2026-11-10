@@ -569,10 +569,17 @@ CREATE TABLE tarefa (
 CREATE INDEX indice_tarefa_responsavel ON tarefa (responsavel_id, status);
 CREATE INDEX indice_tarefa_aberta_prazo ON tarefa (prazo) WHERE status IN ('pendente','em_andamento');
 
+-- Concluída e cancelada são finais. Única exceção: POST /tarefas/{id}/reabrir liga grupo3.reabertura_tarefa
+-- na transação (set_config local) e só pode voltar o status para pendente, limpar concluida_em e trocar o prazo.
 CREATE FUNCTION proteger_tarefa() RETURNS trigger LANGUAGE plpgsql SET search_path = grupo3, pg_catalog AS $$
 BEGIN
   IF OLD.status IN ('concluida','cancelada') THEN
-    RAISE EXCEPTION 'Tarefa concluída ou cancelada não pode ser alterada.';
+    IF coalesce(current_setting('grupo3.reabertura_tarefa', true), '') <> 'on'
+       OR NEW.status <> 'pendente' OR NEW.concluida_em IS NOT NULL
+       OR (NEW.titulo, NEW.descricao, NEW.responsavel_id, NEW.prioridade, NEW.criado_por_ref, NEW.criado_em)
+          IS DISTINCT FROM (OLD.titulo, OLD.descricao, OLD.responsavel_id, OLD.prioridade, OLD.criado_por_ref, OLD.criado_em) THEN
+      RAISE EXCEPTION 'Tarefa concluída ou cancelada não pode ser alterada; use a reabertura.';
+    END IF;
   END IF;
   NEW.atualizado_em := now();
   RETURN NEW;
@@ -586,6 +593,7 @@ CREATE TRIGGER impedir_exclusao_tarefa BEFORE DELETE ON tarefa
 CREATE TABLE historico_tarefa (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tarefa_id uuid NOT NULL REFERENCES tarefa(id),
+  evento text NOT NULL DEFAULT 'status' CHECK (evento IN ('criada','status','reaberta')),
   status_anterior status_tarefa,
   status_novo status_tarefa NOT NULL,
   observacao text CHECK (observacao IS NULL OR char_length(observacao) <= 1000),
@@ -596,11 +604,13 @@ CREATE INDEX indice_historico_tarefa ON historico_tarefa (tarefa_id, em);
 CREATE TRIGGER preservar_historico_tarefa BEFORE UPDATE OR DELETE ON historico_tarefa
   FOR EACH ROW EXECUTE FUNCTION impedir_alteracao_historico();
 
--- O que os jobs já notificaram (T-008), para não repetir: uma chave por tarefa atrasada
--- ("tarefa_atrasada:<id>") e uma por idoso por ciclo odontológico ("odonto_pendente:<ciclo>:<idoso_ref>").
+-- O que os jobs já notificaram (T-008), para não repetir:
+--   "tarefa_atrasada:<id>"          aviso ao responsável (só gravado quando enviado);
+--   "tarefa_atrasada_criador:<id>"  aviso a quem criou, quando o responsável não tem usuário;
+--   "odonto_pendente:<ciclo>:<ref>" um por idoso por ciclo odontológico.
 CREATE TABLE notificacao_controle (
   chave text PRIMARY KEY CHECK (char_length(chave) <= 200),
-  tipo text NOT NULL CHECK (tipo IN ('tarefa_atrasada','odonto_pendente')),
+  tipo text NOT NULL CHECK (tipo IN ('tarefa_atrasada','tarefa_atrasada_criador','odonto_pendente')),
   status text NOT NULL CHECK (status IN ('enviada','sem_destinatario')),
   destinatarios integer NOT NULL DEFAULT 0 CHECK (destinatarios >= 0),
   criado_em timestamptz NOT NULL DEFAULT now()

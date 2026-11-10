@@ -67,13 +67,13 @@ function publica(tarefa) {
 
 async function historicoDaTarefa(id, db = prisma) {
   const rows = await db.$queryRaw`
-    SELECT h.id, h.status_anterior::text AS status_anterior, h.status_novo::text AS status_novo, h.observacao, h.em,
+    SELECT h.id, h.evento, h.status_anterior::text AS status_anterior, h.status_novo::text AS status_novo, h.observacao, h.em,
            u.id AS autor_id, u.name AS autor_nome
     FROM grupo3.historico_tarefa h LEFT JOIN public.users u ON u.ref = h.autor_ref
     WHERE h.tarefa_id = ${id}::uuid ORDER BY h.em, h.id
   `;
   return rows.map((row) => ({
-    id: row.id, statusAnterior: row.status_anterior, statusNovo: row.status_novo, observacao: row.observacao, em: row.em,
+    id: row.id, evento: row.evento, statusAnterior: row.status_anterior, statusNovo: row.status_novo, observacao: row.observacao, em: row.em,
     autor: row.autor_id ? { id: row.autor_id, nome: row.autor_nome } : null,
   }));
 }
@@ -148,8 +148,8 @@ router.post(
         RETURNING id
       `;
       await tx.$executeRaw`
-        INSERT INTO grupo3.historico_tarefa (tarefa_id, status_anterior, status_novo, observacao, autor_ref)
-        VALUES (${rows[0].id}::uuid, NULL, 'pendente', 'Tarefa criada.', ${req.user.ref}::uuid)
+        INSERT INTO grupo3.historico_tarefa (tarefa_id, evento, status_anterior, status_novo, observacao, autor_ref)
+        VALUES (${rows[0].id}::uuid, 'criada', NULL, 'pendente', 'Tarefa criada.', ${req.user.ref}::uuid)
       `;
       await audit(tx, {
         userId: req.user.id, action: "tarefa.criar", entity: "grupo3.tarefa", entityId: rows[0].id,
@@ -228,6 +228,43 @@ router.patch(
       await audit(tx, {
         userId: req.user.id, action: "tarefa.status", entity: "grupo3.tarefa", entityId: atual.id,
         payload: { resultado: "sucesso", anterior: atual.status, novo: b.status, comoResponsavel: Boolean(responsavel) },
+      });
+    });
+    const tarefa = await buscarTarefa(req.params.id);
+    res.json({ ...publica(tarefa), historico: await historicoDaTarefa(tarefa.id) });
+  }),
+);
+
+// Reabrir tarefa concluída ou cancelada: só tarefas.administrar, com motivo; "reaberta" no histórico imutável.
+// O banco só aceita a mudança com grupo3.reabertura_tarefa ligado nesta transação.
+router.post(
+  "/tarefas/:id/reabrir",
+  requirePerm(ADMIN),
+  validate(idParam, "params"),
+  validate(z.object({
+    motivo: z.string().trim().min(3, "Informe o motivo com ao menos 3 caracteres.").max(1000),
+    prazo: dataHora.optional(),
+  })),
+  asyncHandler(async (req, res) => {
+    const b = req.body;
+    await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM grupo3.tarefa WHERE id = ${req.params.id}::uuid FOR UPDATE`;
+      const atual = await buscarTarefa(req.params.id, tx);
+      if (!atual) notFound("Tarefa não encontrada.");
+      if (!["concluida", "cancelada"].includes(atual.status)) throw new HttpError(409, "Só tarefa concluída ou cancelada pode ser reaberta.");
+      await tx.$queryRaw`SELECT set_config('grupo3.reabertura_tarefa', 'on', true)`;
+      await tx.$executeRaw`
+        UPDATE grupo3.tarefa SET status = 'pendente', concluida_em = NULL, prazo = ${b.prazo ?? atual.prazo}
+        WHERE id = ${atual.id}::uuid
+      `;
+      await tx.$queryRaw`SELECT set_config('grupo3.reabertura_tarefa', 'off', true)`;
+      await tx.$executeRaw`
+        INSERT INTO grupo3.historico_tarefa (tarefa_id, evento, status_anterior, status_novo, observacao, autor_ref)
+        VALUES (${atual.id}::uuid, 'reaberta', ${atual.status}::grupo3.status_tarefa, 'pendente', ${b.motivo}, ${req.user.ref}::uuid)
+      `;
+      await audit(tx, {
+        userId: req.user.id, action: "tarefa.reabrir", entity: "grupo3.tarefa", entityId: atual.id,
+        payload: { resultado: "sucesso", anterior: atual.status, prazo: b.prazo ?? null },
       });
     });
     const tarefa = await buscarTarefa(req.params.id);
