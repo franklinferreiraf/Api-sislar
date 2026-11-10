@@ -82,6 +82,20 @@ describe("grupo3 · agendador de jobs (T-008)", () => {
     assert.equal(executar.mock.callCount(), 2);
   });
 
+  it("registra no log a primeira execução de cada job e depois só quando há trabalho", async () => {
+    const vazio = mock.fn(async () => ({ processados: 0 }));
+    const comTrabalho = mock.fn(async () => ({ processados: 2 }));
+    iniciarJobs({ intervaloSeg: 10, jobs: [{ nome: "vazio", executar: vazio }, { nome: "ocupado", executar: comTrabalho }], log: silencioso });
+    mock.timers.tick(10_000);
+    await fluir();
+    mock.timers.tick(10_000);
+    await fluir();
+    const linhas = silencioso.log.mock.calls.map((c) => c.arguments[0]);
+    assert.equal(linhas.filter((l) => l.startsWith("[grupo3:vazio] primeira execução ok")).length, 1);
+    assert.equal(linhas.filter((l) => l.startsWith("[grupo3:vazio]")).length, 1);
+    assert.equal(linhas.filter((l) => l.startsWith("[grupo3:ocupado]")).length, 2);
+  });
+
   it("respeita o intervalo mínimo de 10 s", async () => {
     const executar = mock.fn(async () => ({}));
     iniciarJobs({ intervaloSeg: 1, jobs: [{ nome: "rapido", executar }], log: silencioso });

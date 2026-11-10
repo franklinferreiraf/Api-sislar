@@ -19,13 +19,21 @@ let timerAtual = null;
  */
 export function criarRodada(jobs, { log = console } = {}) {
   const emExecucao = new Set();
+  const jaRodou = new Set();
   return async function rodar() {
     await Promise.all(jobs.map(async (job) => {
       if (emExecucao.has(job.nome)) return;
       emExecucao.add(job.nome);
       try {
         const resumo = await job.executar();
-        if (resumo?.processados) log.log(`[grupo3:${job.nome}] ${JSON.stringify(resumo)}`);
+        // Primeira execução de cada job sempre vai para o log (confirma que o agendador está rodando); depois,
+        // só quando houve trabalho. O resumo tem apenas contagens.
+        if (!jaRodou.has(job.nome)) {
+          jaRodou.add(job.nome);
+          log.log(`[grupo3:${job.nome}] primeira execução ok ${JSON.stringify(resumo ?? {})}`);
+        } else if (resumo?.processados) {
+          log.log(`[grupo3:${job.nome}] ${JSON.stringify(resumo)}`);
+        }
       } catch (error) {
         // Só a mensagem técnica: sem payload, idoso ou destinatário.
         try {
