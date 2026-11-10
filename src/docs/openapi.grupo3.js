@@ -1315,7 +1315,7 @@ export const pathsGrupo3 = {
         taxaRealizacao: 91.5, taxaCancelamento: 6.7,
         porCategoria: [{ categoria: "fisioterapia", total: 40, previstos: 38, agendados: 10, realizados: 26, naoRealizados: 2, cancelados: 2, pendentesDeRegistro: 1, taxaRealizacao: 92.9, taxaCancelamento: 5 }],
       },
-      description: "Só números, sem dados de idoso. Fórmulas no README do Grupo 3 (US-128). Taxas em %, com uma casa; denominador zero → null.",
+      description: "Só números, sem dados de idoso. Fórmulas: taxaRealizacao = realizados ÷ (realizados + naoRealizados); taxaCancelamento = cancelados ÷ total; previstos = total − cancelados (US-128). Taxas em %, com uma casa; denominador zero → null.",
     }),
   },
   "/api/indicadores/tarefas": {

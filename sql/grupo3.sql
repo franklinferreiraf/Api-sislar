@@ -25,7 +25,7 @@ CREATE TYPE prioridade_tarefa AS ENUM ('baixa','media','alta','urgente');
 CREATE TYPE status_tarefa AS ENUM ('pendente','em_andamento','concluida','cancelada');
 CREATE TYPE status_lembrete AS ENUM ('pendente','enviado','entregue','falha','sem_destinatario','cancelado');
 
--- Regras configuráveis do grupo (chave/valor). Ver docs/grupo3/decisoes-pendentes.md.
+-- Regras configuráveis do grupo (chave/valor).
 CREATE TABLE configuracao (
   chave text PRIMARY KEY CHECK (chave ~ '^[a-z0-9_.]+$'),
   valor jsonb NOT NULL,

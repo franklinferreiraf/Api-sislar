@@ -1,7 +1,7 @@
 // Indicadores agregados do Grupo 3 para o dashboard do Grupo 5 (US-119, US-123, US-100, US-128).
 // Só números: nenhum nome ou identificador de idoso. Taxas com denominador zero são null.
 // Períodos e "hoje" no fuso da instituição (grupo3.configuracao.fuso_horario).
-// Permissão proposta: modulo.dashboard (pergunta aberta para o G5 em docs/grupo3/decisoes-pendentes.md).
+// Permissão proposta: modulo.dashboard (a confirmar com o G5).
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../db/prisma.js";
