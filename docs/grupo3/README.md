@@ -12,7 +12,7 @@ Backend dos épicos E07 (agenda, cuidados e atendimentos), E08 (fisioterapia), E
 | 6 | US-094 a US-096 + indicadores para o Grupo 5 + jobs de alerta | **Entregue** |
 | 7 | US-081, US-090 (P2) | **Entregue** |
 
-As suposições e as decisões pendentes estão em [decisoes-pendentes.md](decisoes-pendentes.md).
+As suposições, as decisões pendentes e as perguntas para os outros grupos (por destinatário) estão em [decisoes-pendentes.md](decisoes-pendentes.md).
 
 ## Rodar os testes com o banco em outra porta
 

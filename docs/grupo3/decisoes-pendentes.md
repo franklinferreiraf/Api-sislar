@@ -57,14 +57,6 @@ Cada linha registra o que foi assumido e onde está no código, para trocar sem 
 | Publicação no prontuário | A evolução do Grupo 1 já existe: o registro finalizado vira evolução `finalizado`, com título indicando a origem e o registro do G3 nas notas, na mesma transação. **A permissão `evolucao.create` não é contornada**: se quem finaliza o registro (ou o adendo) não a tem, o registro é finalizado no G3 e fica com `publicacao_status = "aguardando_permissao"`. `POST /api/registros-clinicos/republicar-pendentes` (`atendimento-clinico.administrar`) tenta de novo, em nome de quem finalizou, quando essa pessoa passa a ter a permissão. | `publicarSePermitido()` em `src/routes/grupo3/clinico.js`; `podePublicar()` em `src/grupo3/portas/prontuario.js` |
 | Tipo da evolução publicada | **Solução temporária:** tipo `reavaliacao`, porque o catálogo do Grupo 1 (`rotina`, `reavaliacao`, `cuidado`, `intercorrencia`) não tem "consulta" nem "fisioterapia". O G3 não altera o catálogo do G1. | `TODO(integracao-G1)` em `src/grupo3/portas/prontuario.js` |
 
-## Perguntas para o Grupo 1 e a Fundação
-
-| # | Para | Pergunta | Impacto no G3 |
-|---|---|---|---|
-| 1 | Grupo 1 / Fundação (D-001) | Os perfis odontologia e fisioterapia devem ter `evolucao.create` para que o registro clínico (odontologia) e a evolução de fisioterapia apareçam no prontuário? Ou a publicação deve ser feita por outro perfil, ou por uma permissão específica de integração? | Hoje esses registros ficam `aguardando_permissao` até alguém conceder a permissão e rodar `republicar-pendentes`. |
-| 2 | Grupo 1 | Criar no catálogo da evolução os tipos `consulta` e `fisioterapia`? | Hoje a publicação usa `reavaliacao` como solução temporária; troca de uma linha no adaptador. |
-| 3 | Grupo 5 | Qual permissão deve ler os indicadores `/api/indicadores/*`? **Proposta:** `modulo.dashboard` (a mesma do `/api/dashboard`; hoje admin e gestor). Alternativas: um código próprio de leitura de indicadores, ou `agenda.administrar`. | Troca de uma constante (`PERMISSAO_INDICADORES` em `src/routes/grupo3/indicadores.js`). |
-| 4 | Grupo 5 | Os períodos padrão (mês corrente até hoje; equipe: hoje) e as fórmulas documentadas no README atendem ao dashboard e aos relatórios? | Ajuste nos padrões, sem mudar o modelo. |
 | Finalizar registro clínico | Exige consulta `realizado`. Rascunho pode ser aberto para consulta agendada (ex.: anotações prévias). Consulta cancelada ou não realizada não recebe registro. | `src/routes/grupo3/clinico.js` |
 | Quem edita o rascunho | Só o autor, ou quem tem `atendimento-clinico.administrar`. | `exigirAutorOuAdmin()` |
 | Consulta fora da escala | Aceita com aviso `fora_da_escala` (não bloqueia). Consulta exige `local`. | `avisosDeEscala()` em `src/routes/grupo3/agendamentos.js` |
@@ -94,3 +86,36 @@ Cada linha registra o que foi assumido e onde está no código, para trocar sem 
 | Migrations | O repositório não tem migrations incrementais: `db:setup` recria o banco a partir de `sql/*.sql`. O schema do G3 é `sql/grupo3.sql`. Migração incremental é decisão da Fundação. | `src/db/reset.js` |
 | Agenda legada | `/api/agenda`, `/api/atendimentos` e `/api/funcionarios` ficam intactas e marcadas como obsoletas no OpenAPI. Não há migração de dados de `agenda_events` e `appointments`. | `src/docs/openapi.js` |
 | Auditoria de negação | Respostas 403 não são auditadas pelo G3 (cabe à Fundação). Recusas por conflito de agenda são auditadas. | `auditarRecusa()` em `src/routes/grupo3/agendamentos.js` |
+
+## Perguntas pendentes por destinatário
+
+### Grupo 1 (idosos e prontuário)
+
+| # | Pergunta | Impacto no G3 | Onde |
+|---|---|---|---|
+| G1-1 | Criar no catálogo da evolução os tipos `consulta` e `fisioterapia`? | Hoje a publicação usa `reavaliacao` como solução temporária; troca de uma linha no adaptador. | `TODO(integracao-G1)` em `src/grupo3/portas/prontuario.js` |
+| G1-2 | Haverá status de inativação do idoso (óbito, desligamento)? Com qual campo? | Hoje todo idoso cadastrado é tratado como ativo ao agendar e registrar. | `TODO(integracao-G1)` em `src/grupo3/portas/idosos.js` |
+| G1-3 | Como será a regra de visibilidade do prontuário por idoso (US-031)? | Hoje o G3 exige a permissão clínica do módulo e a porta `podeVerIdoso()` libera tudo. | `TODO(integracao-G1)` em `src/grupo3/portas/prontuario.js` |
+| G1-4 | Qual será o contrato da linha do tempo do idoso (US-030)? | Hoje o G3 publica só na evolução; quando a linha do tempo existir, publicar também nela. | `TODO(integracao-G1)` em `src/grupo3/portas/prontuario.js` |
+
+### Grupo 5 (dashboard e relatórios)
+
+| # | Pergunta | Impacto no G3 | Onde |
+|---|---|---|---|
+| G5-1 | Qual permissão deve ler os indicadores `/api/indicadores/*`? **Proposta:** `modulo.dashboard` (a mesma do `/api/dashboard`; hoje admin e gestor). Alternativas: um código próprio de leitura de indicadores, ou `agenda.administrar`. | Troca de uma constante. | `PERMISSAO_INDICADORES` em `src/routes/grupo3/indicadores.js` |
+| G5-2 | Os períodos padrão (mês corrente até hoje; equipe: hoje) e as fórmulas documentadas no README atendem ao dashboard e aos relatórios? | Ajuste nos padrões, sem mudar o modelo. | `src/routes/grupo3/indicadores.js` |
+| G5-3 | O serviço de relatórios/exportação (T-006) vai existir? Os relatórios US-081 e US-090 precisam de PDF/planilha? | Hoje são JSON com filtros e paginação; a exportação ficaria com o G5 consumindo esses endpoints. | `src/routes/grupo3/relatorios.js` |
+
+### Fundação (autenticação, permissões, auditoria)
+
+| # | Pergunta | Impacto no G3 | Onde |
+|---|---|---|---|
+| F-1 | Os perfis odontologia e fisioterapia devem ter `evolucao.create` (D-001) para que o registro clínico odontológico e a evolução de fisioterapia apareçam no prontuário? Ou a publicação deve ser feita por outro perfil, ou por uma permissão específica de integração? (Decisão conjunta com o Grupo 1.) | Hoje esses registros ficam `aguardando_permissao` até alguém conceder a permissão e rodar `republicar-pendentes`. | `src/lib/permissions.js`; `podePublicar()` |
+| F-2 | A auditoria (`audit_log`) vai ganhar um campo próprio de resultado e o registro das negações (403)? | Hoje o G3 grava o resultado em `payload.resultado` e não audita os 403. | `src/grupo3/auditoria.js`; `src/db/helpers.js` |
+| F-3 | Haverá migrations incrementais? | Hoje `db:setup` recria o banco a partir de `sql/*.sql`; o schema do G3 é `sql/grupo3.sql`. | `src/db/reset.js` |
+
+### Grupo 4 (notificações)
+
+| # | Pergunta | Impacto no G3 | Onde |
+|---|---|---|---|
+| G4-1 | Quando o serviço de notificações (T-005/US-117) existir, qual o contrato e quais canais (D-008)? | Hoje o adaptador grava direto em `public.notifications` (canal interno). | `TODO(integracao-G4)` em `src/grupo3/portas/notificacoes.js` |
