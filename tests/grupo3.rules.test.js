@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  chaveCicloOdonto,
+  tarefaAtrasada,
+  textoPendenciasOdonto,
+  transicaoTarefaValida,
   cargaPorDia,
   diasDaSemana,
   taxa,
@@ -329,5 +333,33 @@ describe("grupo3 · rotina semanal da fisioterapia (US-079)", () => {
   it("taxa com uma casa decimal e sem divisão por zero", () => {
     assert.equal(taxa(2, 3), 66.7);
     assert.equal(taxa(0, 0), null);
+  });
+});
+
+describe("grupo3 · tarefas e alertas (US-095, US-096, T-008)", () => {
+  it("transições de status: concluída e cancelada são finais", () => {
+    assert.equal(transicaoTarefaValida("pendente", "em_andamento"), true);
+    assert.equal(transicaoTarefaValida("em_andamento", "pendente"), true);
+    assert.equal(transicaoTarefaValida("em_andamento", "concluida"), true);
+    assert.equal(transicaoTarefaValida("pendente", "pendente"), false);
+    assert.equal(transicaoTarefaValida("concluida", "pendente"), false);
+    assert.equal(transicaoTarefaValida("cancelada", "em_andamento"), false);
+  });
+
+  it("atrasada: prazo vencido e tarefa aberta", () => {
+    const agora = new Date("2030-01-10T12:00:00Z");
+    assert.equal(tarefaAtrasada({ status: "pendente", prazo: "2030-01-10T11:59:00Z" }, agora), true);
+    assert.equal(tarefaAtrasada({ status: "em_andamento", prazo: "2030-01-10T12:00:00Z" }, agora), false);
+    assert.equal(tarefaAtrasada({ status: "concluida", prazo: "2030-01-01T00:00:00Z" }, agora), false);
+  });
+
+  it("texto de pendência odontológica só com o resumo", () => {
+    assert.equal(textoPendenciasOdonto(5, "2026-2"), "5 idosos sem avaliação odontológica no ciclo 2026-2");
+    assert.equal(textoPendenciasOdonto(1, "2026-2"), "1 idoso sem avaliação odontológica no ciclo 2026-2");
+  });
+
+  it("chave do ciclo para não repetir aviso", () => {
+    assert.equal(chaveCicloOdonto({ modo: "semestre_civil", rotulo: "2026-2" }, "2026-11-09"), "2026-2");
+    assert.equal(chaveCicloOdonto({ modo: "dias_corridos", rotulo: "180 dias até 2026-11-09" }, "2026-11-09"), "dias_corridos:2026-11");
   });
 });

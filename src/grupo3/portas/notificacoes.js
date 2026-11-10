@@ -5,14 +5,15 @@
 // ele, mantendo o contrato abaixo.
 
 /**
- * @param {{ usuarioId: string, titulo: string, corpo: string, link?: string }} mensagem
+ * @param {{ usuarioId: string, titulo: string, corpo: string, link?: string, tipo?: string }} mensagem
+ *   tipo: categoria da notificação (agenda, tarefa, odontologia). Padrão: agenda.
  * @param db cliente Prisma (ou transação)
  * @returns {Promise<{ status: "enviado" | "entregue", canal: string, referencia: string | null }>}
  */
 export async function enviarNotificacao(mensagem, db) {
   const rows = await db.$queryRaw`
     INSERT INTO public.notifications (user_id, kind, title, body, link)
-    VALUES (${mensagem.usuarioId}, 'agenda', ${mensagem.titulo}, ${mensagem.corpo}, ${mensagem.link ?? null})
+    VALUES (${mensagem.usuarioId}, ${mensagem.tipo ?? "agenda"}, ${mensagem.titulo}, ${mensagem.corpo}, ${mensagem.link ?? null})
     RETURNING id
   `;
   // No canal interno, gravar na caixa do usuário já é a entrega.

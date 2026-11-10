@@ -7,7 +7,9 @@ import colaboradoresRouter from "./colaboradores.js";
 import escalasRouter from "./escalas.js";
 import especialidadesRouter from "./especialidades.js";
 import fisioterapiaRouter from "./fisioterapia.js";
+import indicadoresRouter from "./indicadores.js";
 import presencasRouter from "./presencas.js";
+import tarefasRouter from "./tarefas.js";
 import tiposAtendimentoRouter from "./tipos-atendimento.js";
 
 const router = Router();
@@ -22,5 +24,7 @@ router.use(escalasRouter);
 router.use(presencasRouter);
 router.use(clinicoRouter);
 router.use(fisioterapiaRouter);
+router.use(tarefasRouter);
+router.use(indicadoresRouter);
 
 export default router;

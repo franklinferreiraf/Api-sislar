@@ -21,6 +21,8 @@ CREATE TYPE situacao_acompanhamento AS ENUM ('em_tratamento','em_acompanhamento'
 CREATE TYPE area_tratamento_externo AS ENUM ('medica','odontologica','outra');
 CREATE TYPE situacao_plano_fisioterapia AS ENUM ('ativo','suspenso','concluido','cancelado');
 CREATE TYPE status_execucao_atividade AS ENUM ('realizada','parcial','nao_realizada');
+CREATE TYPE prioridade_tarefa AS ENUM ('baixa','media','alta','urgente');
+CREATE TYPE status_tarefa AS ENUM ('pendente','em_andamento','concluida','cancelada');
 CREATE TYPE status_lembrete AS ENUM ('pendente','enviado','entregue','falha','sem_destinatario','cancelado');
 
 -- Regras configuráveis do grupo (chave/valor). Ver docs/grupo3/decisoes-pendentes.md.
@@ -547,5 +549,63 @@ BEGIN
 END $$;
 CREATE TRIGGER proteger_evolucao_fisioterapia_antes BEFORE UPDATE OR DELETE ON evolucao_fisioterapia
   FOR EACH ROW EXECUTE FUNCTION proteger_evolucao_fisioterapia();
+
+-- Tarefas da equipe (US-094 a US-096). "Atrasada" é derivado (prazo vencido e status pendente ou
+-- em_andamento), não é gravado. Concluída e cancelada são finais.
+CREATE TABLE tarefa (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  titulo text NOT NULL CHECK (char_length(btrim(titulo)) BETWEEN 3 AND 160),
+  descricao text CHECK (descricao IS NULL OR char_length(descricao) <= 4000),
+  responsavel_id uuid NOT NULL REFERENCES colaborador(id),
+  prazo timestamptz NOT NULL,
+  prioridade prioridade_tarefa NOT NULL DEFAULT 'media',
+  status status_tarefa NOT NULL DEFAULT 'pendente',
+  concluida_em timestamptz,
+  criado_por_ref uuid NOT NULL,
+  criado_em timestamptz NOT NULL DEFAULT now(),
+  atualizado_em timestamptz NOT NULL DEFAULT now(),
+  CHECK ((status = 'concluida') = (concluida_em IS NOT NULL))
+);
+CREATE INDEX indice_tarefa_responsavel ON tarefa (responsavel_id, status);
+CREATE INDEX indice_tarefa_aberta_prazo ON tarefa (prazo) WHERE status IN ('pendente','em_andamento');
+
+CREATE FUNCTION proteger_tarefa() RETURNS trigger LANGUAGE plpgsql SET search_path = grupo3, pg_catalog AS $$
+BEGIN
+  IF OLD.status IN ('concluida','cancelada') THEN
+    RAISE EXCEPTION 'Tarefa concluída ou cancelada não pode ser alterada.';
+  END IF;
+  NEW.atualizado_em := now();
+  RETURN NEW;
+END $$;
+CREATE TRIGGER proteger_tarefa_antes_de_atualizar BEFORE UPDATE ON tarefa
+  FOR EACH ROW EXECUTE FUNCTION proteger_tarefa();
+CREATE TRIGGER impedir_exclusao_tarefa BEFORE DELETE ON tarefa
+  FOR EACH ROW EXECUTE FUNCTION impedir_exclusao();
+
+-- Histórico imutável das mudanças de status (US-095).
+CREATE TABLE historico_tarefa (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tarefa_id uuid NOT NULL REFERENCES tarefa(id),
+  status_anterior status_tarefa,
+  status_novo status_tarefa NOT NULL,
+  observacao text CHECK (observacao IS NULL OR char_length(observacao) <= 1000),
+  autor_ref uuid NOT NULL,
+  em timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX indice_historico_tarefa ON historico_tarefa (tarefa_id, em);
+CREATE TRIGGER preservar_historico_tarefa BEFORE UPDATE OR DELETE ON historico_tarefa
+  FOR EACH ROW EXECUTE FUNCTION impedir_alteracao_historico();
+
+-- O que os jobs já notificaram (T-008), para não repetir: uma chave por tarefa atrasada
+-- ("tarefa_atrasada:<id>") e uma por idoso por ciclo odontológico ("odonto_pendente:<ciclo>:<idoso_ref>").
+CREATE TABLE notificacao_controle (
+  chave text PRIMARY KEY CHECK (char_length(chave) <= 200),
+  tipo text NOT NULL CHECK (tipo IN ('tarefa_atrasada','odonto_pendente')),
+  status text NOT NULL CHECK (status IN ('enviada','sem_destinatario')),
+  destinatarios integer NOT NULL DEFAULT 0 CHECK (destinatarios >= 0),
+  criado_em timestamptz NOT NULL DEFAULT now()
+);
+CREATE TRIGGER preservar_notificacao_controle BEFORE UPDATE OR DELETE ON notificacao_controle
+  FOR EACH ROW EXECUTE FUNCTION impedir_alteracao_historico();
 
 COMMIT;

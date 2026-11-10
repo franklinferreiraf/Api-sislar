@@ -1,9 +1,14 @@
 // Jobs agendados do Grupo 3 (T-008). O repositório não tinha mecanismo de jobs: o agendador roda no
 // próprio processo e só liga com JOBS_ENABLED=true (desligado nos testes). Com várias instâncias, cada job
 // usa FOR UPDATE SKIP LOCKED para não processar o mesmo item duas vezes.
+import { processarPendenciasOdontologicas, processarTarefasAtrasadas } from "./alertas.js";
 import { processarLembretes } from "./lembretes.js";
 
-export const JOBS_PADRAO = [{ nome: "lembretes", executar: () => processarLembretes() }];
+export const JOBS_PADRAO = [
+  { nome: "lembretes", executar: () => processarLembretes() },
+  { nome: "tarefas_atrasadas", executar: () => processarTarefasAtrasadas() },
+  { nome: "pendencias_odontologicas", executar: () => processarPendenciasOdontologicas() },
+];
 
 let timerAtual = null;
 

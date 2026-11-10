@@ -3,6 +3,7 @@ import { after, before, describe, it } from "node:test";
 import request from "supertest";
 import { app } from "../src/app.js";
 import { prisma } from "../src/db/prisma.js";
+import { processarPendenciasOdontologicas, processarTarefasAtrasadas } from "../src/grupo3/alertas.js";
 import { processarLembretes } from "../src/grupo3/lembretes.js";
 import { prepare, shutdown } from "./prepare.js";
 
@@ -80,6 +81,7 @@ describe("grupo3 · documentação", () => {
       "/api/agendamentos/{id}/registro-clinico", "/api/registros-clinicos/{id}", "/api/odontologia/acompanhamentos",
       "/api/tratamentos-externos", "/api/odontologia/pendencias",
       "/api/fisioterapia/planos", "/api/fisioterapia/rotina-semanal", "/api/fisioterapia/indicadores", "/api/fisioterapia/planos/{id}/evolucoes",
+      "/api/tarefas", "/api/me/tarefas", "/api/indicadores/atendimentos", "/api/indicadores/tarefas", "/api/indicadores/equipe",
     ]) {
       assert.ok(spec.paths[rota]?.get, rota);
     }
@@ -1540,5 +1542,170 @@ describe("grupo3 · fisioterapia (US-075 a US-080)", () => {
     const vazio = await get("gestor", "/api/fisioterapia/indicadores?inicio=2024-01-01&fim=2024-01-31");
     assert.equal(vazio.body.sessoes.taxaRealizacao, null);
     assert.equal((await get("recepcao", "/api/fisioterapia/indicadores")).status, 403);
+  });
+});
+
+// ---------------- Fatia 6 ----------------
+
+Object.assign(EMAILS, { tecnico: "joana.rocha@lardoirmaovelho.example" });
+
+async function notificacoesDe(usuarioId, tipo) {
+  return prisma.$queryRaw`SELECT id, title, body, link FROM public.notifications WHERE user_id = ${usuarioId} AND kind = ${tipo} ORDER BY at`;
+}
+
+describe("grupo3 · tarefas (US-094 a US-096)", () => {
+  let renata;
+  let tarefa;
+  const daquiA = (horas) => new Date(Date.now() + horas * 3_600_000).toISOString();
+
+  before(async () => {
+    renata = await colaboradorPorNome("Renata Gouveia");
+  });
+
+  it("US-094: cria tarefa com responsável, prazo, prioridade, status e descrição", async () => {
+    const criada = await post("enfermagem", "/api/tarefas", {
+      titulo: "Organizar materiais da sala de fisioterapia", descricao: "Separar faixas elásticas por cor.",
+      responsavelId: renata, prazo: daquiA(48), prioridade: "alta",
+    });
+    assert.equal(criada.status, 201);
+    tarefa = criada.body.id;
+    assert.equal(criada.body.status, "pendente");
+    assert.equal(criada.body.prioridade, "alta");
+    assert.equal(criada.body.atrasada, false);
+    assert.equal(criada.body.responsavel.nome, "Renata Gouveia");
+    assert.equal(criada.body.historico[0].statusNovo, "pendente");
+    assert.equal((await post("recepcao", "/api/tarefas", { titulo: "Sem permissão", responsavelId: renata, prazo: daquiA(1) })).status, 403);
+  });
+
+  it("US-095: status pelo responsável ou por tarefas.administrar, com histórico imutável", async () => {
+    assert.equal((await patch("tecnico", `/api/tarefas/${tarefa}/status`, { status: "em_andamento" })).status, 403);
+    const andamento = await patch("fisio", `/api/tarefas/${tarefa}/status`, { status: "em_andamento", observacao: "Comecei hoje." });
+    assert.equal(andamento.status, 200);
+    assert.equal(andamento.body.status, "em_andamento");
+    assert.equal((await patch("fisio", `/api/tarefas/${tarefa}/status`, { status: "em_andamento" })).status, 422);
+    const concluida = await patch("gestor", `/api/tarefas/${tarefa}/status`, { status: "concluida" });
+    assert.equal(concluida.status, 200);
+    assert.ok(concluida.body.concluidaEm);
+    assert.deepEqual(concluida.body.historico.map((h) => [h.statusAnterior, h.statusNovo, h.autor.id]), [
+      [null, "pendente", "s03"], ["pendente", "em_andamento", "s06"], ["em_andamento", "concluida", "s02"],
+    ]);
+    assert.equal(concluida.body.historico[1].observacao, "Comecei hoje.");
+    assert.equal((await patch("gestor", `/api/tarefas/${tarefa}/status`, { status: "pendente" })).status, 409);
+    await assert.rejects(prisma.$executeRaw`UPDATE grupo3.historico_tarefa SET observacao = 'x' WHERE tarefa_id = ${tarefa}::uuid`);
+    await assert.rejects(prisma.$executeRaw`UPDATE grupo3.tarefa SET titulo = 'x' WHERE id = ${tarefa}::uuid`);
+    await assert.rejects(prisma.$executeRaw`DELETE FROM grupo3.tarefa WHERE id = ${tarefa}::uuid`);
+  });
+
+  it("só quem criou (ou a administração) edita os dados da tarefa", async () => {
+    const outra = await post("enfermagem", "/api/tarefas", { titulo: "Revisar lista de chamada", responsavelId: renata, prazo: daquiA(24) });
+    const corpo = { titulo: "Revisar lista de chamada (manhã)", responsavelId: renata, prazo: daquiA(30), prioridade: "baixa" };
+    assert.equal((await put("medico", `/api/tarefas/${outra.body.id}`, corpo)).status, 403);
+    const editada = await put("enfermagem", `/api/tarefas/${outra.body.id}`, corpo);
+    assert.equal(editada.status, 200);
+    assert.equal(editada.body.prioridade, "baixa");
+    assert.equal((await put("gestor", `/api/tarefas/${outra.body.id}`, { ...corpo, prioridade: "urgente" })).body.prioridade, "urgente");
+  });
+
+  it("US-096: atrasada é derivada e filtrável; tarefa concluída não fica atrasada", async () => {
+    const vencida = await post("gestor", "/api/tarefas", { titulo: "Entregar relatório de presença", responsavelId: renata, prazo: daquiA(-5) });
+    assert.equal(vencida.body.atrasada, true);
+    const atrasadas = await get("tecnico", "/api/tarefas?atrasadas=true&limit=100");
+    assert.ok(atrasadas.body.data.every((t) => t.atrasada));
+    assert.ok(atrasadas.body.data.some((t) => t.id === vencida.body.id));
+    assert.ok(!atrasadas.body.data.some((t) => t.titulo === "Atualizar contatos dos voluntários"));
+    const minhas = await get("fisio", "/api/me/tarefas?limit=100");
+    assert.ok(minhas.body.data.every((t) => t.responsavel.id === renata));
+    assert.ok(minhas.body.data.some((t) => t.id === vencida.body.id));
+  });
+});
+
+describe("grupo3 · jobs de alerta sem repetição (T-008)", () => {
+  it("tarefa atrasada: duas rodadas geram uma notificação só", async () => {
+    const renata = await colaboradorPorNome("Renata Gouveia");
+    const vencida = await post("gestor", "/api/tarefas", {
+      titulo: "Tarefa vencida para alerta", responsavelId: renata, prazo: new Date(Date.now() - 3_600_000).toISOString(),
+    });
+    const semUsuario = (await post("gestor", "/api/colaboradores", { nome: "Responsável sem login", vinculo: "externo" })).body.id;
+    await post("gestor", "/api/tarefas", { titulo: "Tarefa vencida sem destinatário", responsavelId: semUsuario, prazo: new Date(Date.now() - 3_600_000).toISOString() });
+    const primeira = await processarTarefasAtrasadas();
+    const segunda = await processarTarefasAtrasadas();
+    assert.ok(primeira.notificadas >= 1);
+    assert.ok(primeira.semDestinatario >= 1);
+    assert.equal(segunda.processados, 0);
+    const avisos = (await notificacoesDe("s06", "tarefa")).filter((n) => n.link === `/tarefas/${vencida.body.id}`);
+    assert.equal(avisos.length, 1);
+    assert.match(avisos[0].body, /Tarefa vencida para alerta/);
+  });
+
+  it("pendência odontológica: resumo sem nomes, só para atendimento-clinico.administrar, uma vez por idoso no ciclo", async () => {
+    const primeira = await processarPendenciasOdontologicas();
+    const segunda = await processarPendenciasOdontologicas();
+    assert.ok(primeira.idososNovos > 0);
+    assert.equal(segunda.processados, 0);
+    assert.equal(segunda.notificadas, 0);
+    for (const usuario of ["s01", "s02"]) {
+      const avisos = await notificacoesDe(usuario, "odontologia");
+      assert.equal(avisos.length, 1, usuario);
+      assert.match(avisos[0].body, /^\d+ idosos? sem avaliação odontológica no ciclo \d{4}-[12]$/);
+      assert.match(avisos[0].link, /^\/odontologia\/pendencias\?ciclo=\d{4}-[12]$/);
+    }
+    assert.equal((await notificacoesDe("s05", "odontologia")).length, 0);
+    assert.equal((await notificacoesDe("s07", "odontologia")).length, 0);
+    const nomes = await prisma.$queryRaw`SELECT name FROM public.patients`;
+    const texto = (await notificacoesDe("s01", "odontologia")).map((n) => `${n.title} ${n.body} ${n.link}`).join(" ");
+    assert.ok(nomes.every(({ name }) => !texto.includes(name)));
+    assert.ok(!/\bp\d{2}\b/.test(texto));
+  });
+});
+
+describe("grupo3 · indicadores para o Grupo 5", () => {
+  it("atendimentos: números agregados por status e categoria, sem dados de idoso", async () => {
+    const resposta = await get("gestor", "/api/indicadores/atendimentos?inicio=2030-03-01&fim=2030-03-31");
+    assert.equal(resposta.status, 200);
+    assert.equal(resposta.body.periodo.fuso, "America/Sao_Paulo");
+    assert.ok(resposta.body.total > 0);
+    assert.equal(resposta.body.previstos, resposta.body.total - resposta.body.cancelados);
+    assert.ok(resposta.body.porCategoria.length > 0);
+    const texto = JSON.stringify(resposta.body);
+    assert.ok(!/idoso/i.test(texto) && !/"p\d{2}"/.test(texto));
+    const vazio = await get("gestor", "/api/indicadores/atendimentos?inicio=2020-01-01&fim=2020-01-31");
+    assert.equal(vazio.body.total, 0);
+    assert.equal(vazio.body.taxaRealizacao, null);
+    assert.equal(vazio.body.taxaCancelamento, null);
+    assert.equal((await get("gestor", "/api/indicadores/atendimentos?inicio=2030-03-10&fim=2030-03-01")).status, 422);
+  });
+
+  it("tarefas: abertas, atrasadas e conclusão no prazo", async () => {
+    const resposta = await get("gestor", "/api/indicadores/tarefas");
+    assert.equal(resposta.status, 200);
+    assert.ok(resposta.body.agora.atrasadas >= 1);
+    assert.ok(resposta.body.agora.abertas >= resposta.body.agora.atrasadas);
+    assert.equal(resposta.body.agora.porPrioridade.length, 4);
+    assert.ok(resposta.body.noPeriodo.concluidas >= 1);
+    assert.equal(
+      resposta.body.noPeriodo.taxaConclusaoNoPrazo,
+      Math.round((resposta.body.noPeriodo.concluidasNoPrazo / resposta.body.noPeriodo.concluidas) * 1000) / 10,
+    );
+    const vazio = await get("gestor", "/api/indicadores/tarefas?inicio=2020-01-01&fim=2020-01-31");
+    assert.equal(vazio.body.noPeriodo.concluidas, 0);
+    assert.equal(vazio.body.noPeriodo.taxaConclusaoNoPrazo, null);
+  });
+
+  it("equipe: presença do dia e cobertura das escalas", async () => {
+    const hoje = await get("gestor", "/api/indicadores/equipe");
+    assert.equal(hoje.status, 200);
+    assert.ok(hoje.body.colaboradoresAtivos > 0);
+    assert.ok(hoje.body.presentesNoDia >= 1);
+    assert.equal(hoje.body.porVinculo.length, 3);
+    const semEscala = await get("gestor", "/api/indicadores/equipe?data=2020-01-01");
+    assert.equal(semEscala.body.escalasNoDia, 0);
+    assert.equal(semEscala.body.taxaPresencaEscala, null);
+  });
+
+  it("leitura com a permissão proposta (modulo.dashboard)", async () => {
+    for (const rota of ["atendimentos", "tarefas", "equipe"]) {
+      assert.equal((await get("recepcao", `/api/indicadores/${rota}`)).status, 403, rota);
+      assert.equal((await get("admin", `/api/indicadores/${rota}`)).status, 200, rota);
+    }
   });
 });

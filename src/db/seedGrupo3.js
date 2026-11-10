@@ -158,6 +158,31 @@ export async function seedGrupo3(tx) {
             ${sessaoFeita.inicio}, ${fisioRef}::uuid, 'aguardando_permissao')
   `;
 
+  // Tarefas (Fatia 6): uma atrasada, uma aberta e uma concluída.
+  const gestorRef = await refDe(tx, "users", "s02");
+  for (const [titulo, chave, prazo, prioridade, statusTarefa] of [
+    ["Revisar escala de fisioterapia da semana", "fisio", emDias(-1, 18), "alta", "pendente"],
+    ["Conferir estoque de luvas do posto", "enfermeira", emDias(2, 12), "media", "em_andamento"],
+    ["Atualizar contatos dos voluntários", "voluntaria", emDias(-3, 12), "baixa", "concluida"],
+  ]) {
+    const tarefa = (await tx.$queryRaw`
+      INSERT INTO grupo3.tarefa (titulo, responsavel_id, prazo, prioridade, status, concluida_em, criado_por_ref)
+      VALUES (${titulo}, ${colaboradores[chave]}::uuid, ${prazo}, ${prioridade}::grupo3.prioridade_tarefa,
+              ${statusTarefa}::grupo3.status_tarefa, ${statusTarefa === "concluida" ? emDias(-4, 10) : null}, ${gestorRef}::uuid)
+      RETURNING id
+    `)[0].id;
+    await tx.$executeRaw`
+      INSERT INTO grupo3.historico_tarefa (tarefa_id, status_anterior, status_novo, observacao, autor_ref)
+      VALUES (${tarefa}::uuid, NULL, 'pendente', 'Tarefa criada.', ${gestorRef}::uuid)
+    `;
+    if (statusTarefa !== "pendente") {
+      await tx.$executeRaw`
+        INSERT INTO grupo3.historico_tarefa (tarefa_id, status_anterior, status_novo, autor_ref)
+        VALUES (${tarefa}::uuid, 'pendente', ${statusTarefa}::grupo3.status_tarefa, ${gestorRef}::uuid)
+      `;
+    }
+  }
+
   // Atendimento odontológico (Fatia 4): acompanhamento, registro finalizado publicado no prontuário e
   // um tratamento externo.
   const dentistaRef = await refDe(tx, "users", "s07");

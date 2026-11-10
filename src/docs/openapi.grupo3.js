@@ -426,6 +426,42 @@ const corpoAtividade = {
   },
 };
 
+const statusTarefa = { type: "string", enum: ["pendente", "em_andamento", "concluida", "cancelada"] };
+const prioridadeTarefa = { type: "string", enum: ["baixa", "media", "alta", "urgente"] };
+const exemploTarefa = {
+  id: "9c0d1e2f-3a4b-4c5d-8e6f-7a8b9c0d1e2f",
+  titulo: "Revisar escala de fisioterapia da semana",
+  descricao: null,
+  responsavel: { id: exemploColaborador.id, nome: "Renata Gouveia" },
+  prazo: "2026-11-12T21:00:00.000Z",
+  prioridade: "alta",
+  status: "pendente",
+  atrasada: false,
+  concluidaEm: null,
+  criadoPor: { id: "s02", nome: "Ricardo Almeida Teixeira" },
+  criadoEm: "2026-11-09T12:00:00.000Z",
+  atualizadoEm: "2026-11-09T12:00:00.000Z",
+};
+const historicoTarefa = [
+  { id: "h1", statusAnterior: null, statusNovo: "pendente", observacao: "Tarefa criada.", em: "2026-11-09T12:00:00.000Z", autor: { id: "s02", nome: "Ricardo Almeida Teixeira" } },
+  { id: "h2", statusAnterior: "pendente", statusNovo: "em_andamento", observacao: "Comecei hoje.", em: "2026-11-10T11:00:00.000Z", autor: { id: "s06", nome: "Renata Gouveia" } },
+];
+const corpoTarefa = {
+  type: "object",
+  required: ["titulo", "responsavelId", "prazo"],
+  properties: {
+    titulo: { type: "string", minLength: 3, maxLength: 160 },
+    descricao: { type: "string", maxLength: 4000, nullable: true },
+    responsavelId: { ...uuid, description: "Colaborador ativo." },
+    prazo: dataHora,
+    prioridade: { ...prioridadeTarefa, default: "media" },
+  },
+};
+const periodoIndicador = [
+  query("inicio", dataDia, "Padrão: primeiro dia do mês corrente (fuso da instituição)."),
+  query("fim", dataDia, "Padrão: hoje (fuso da instituição)."),
+];
+
 const lgpd = "Em consultas, fisioterapia e avaliações, `observacoes`, `motivoStatus` e `observacaoRealizacao` voltam `null` "
   + "com `conteudoRestrito: true` para quem não tem a permissão clínica (`atendimento-clinico.visualizar` ou "
   + "`fisioterapia.visualizar`), exceto o próprio profissional do agendamento.";
@@ -437,6 +473,8 @@ export const tagsGrupo3 = [
   { name: "G3 · Escalas", description: "US-083, US-084. Escala de atendimento (planejado), cobertura necessária e lacunas." },
   { name: "G3 · Especialidades", description: "Catálogo de especialidades/áreas usado por colaborador, escala e cobertura." },
   { name: "G3 · Fisioterapia", description: "US-075 a US-080. Planos, atividades, execução por sessão, evolução, rotina semanal e indicadores. Sessão = agendamento de categoria fisioterapia com `planoFisioterapiaId`. Leitura auditada." },
+  { name: "G3 · Tarefas", description: "US-094 a US-096. Tarefas da equipe, status com histórico imutável e atrasadas (derivado)." },
+  { name: "G3 · Indicadores", description: "Leitura agregada para o dashboard do Grupo 5 (US-119, US-123, US-100, US-128). Só números." },
   { name: "G3 · Atendimento clínico", description: "US-085 a US-089. Registro clínico de consulta (rascunho → finalizado, correção por adendo), acompanhamento odontológico, tratamento externo e pendências do ciclo. Toda leitura é auditada." },
 ];
 
@@ -1199,6 +1237,83 @@ export const pathsGrupo3 = {
         sessoes: { previstas: 40, realizadas: 30, naoRealizadas: 2, agendadas: 8, canceladas: 3, taxaRealizacao: 93.8 },
       },
       description: "Planos ativos = situação `ativo` e hoje dentro do período. Sessões do período: previstas = não canceladas; `taxaRealizacao` = realizadas ÷ (realizadas + não realizadas), em %. Sem dados do idoso.",
+    }),
+  },
+  "/api/tarefas": {
+    get: op("G3 · Tarefas", "Listar tarefas", "tarefas.visualizar", {
+      query: [
+        ...pagina, query("responsavelId", uuid), query("status", statusTarefa), query("prioridade", prioridadeTarefa),
+        query("atrasadas", { type: "boolean" }, "true = prazo vencido e status pendente ou em_andamento."),
+        query("prazoAte", dataHora), query("q", { type: "string", maxLength: 80 }, "Busca no título."),
+      ],
+      example: lista(exemploTarefa),
+      description: "`atrasada` é derivado (não é status gravado): prazo vencido e tarefa pendente ou em andamento.",
+    }),
+    post: op("G3 · Tarefas", "Criar e distribuir tarefa", "tarefas.criar", {
+      status: 201, body: corpoTarefa,
+      bodyExample: { titulo: "Revisar escala de fisioterapia da semana", responsavelId: exemploColaborador.id, prazo: "2026-11-12T18:00:00-03:00", prioridade: "alta" },
+      example: { ...exemploTarefa, historico: [historicoTarefa[0]] },
+    }),
+  },
+  "/api/me/tarefas": {
+    get: op("G3 · Tarefas", "Minhas tarefas", "tarefas.visualizar", {
+      query: [...pagina, query("status", statusTarefa), query("prioridade", prioridadeTarefa), query("atrasadas", { type: "boolean" })],
+      errors: [404], example: lista(exemploTarefa),
+      description: "Tarefas do colaborador vinculado ao usuário logado (404 sem vínculo).",
+    }),
+  },
+  "/api/tarefas/{id}": {
+    get: op("G3 · Tarefas", "Detalhe da tarefa (com histórico)", "tarefas.visualizar", {
+      params: [path("id")], errors: [404], example: { ...exemploTarefa, historico: historicoTarefa },
+    }),
+    put: op("G3 · Tarefas", "Editar dados da tarefa", "tarefas.criar (quem criou) ou tarefas.administrar", {
+      params: [path("id")], body: corpoTarefa, errors: [404], example: { ...exemploTarefa, historico: historicoTarefa },
+      conflictExample: erro("Tarefa concluída ou cancelada não pode ser alterada."),
+    }),
+  },
+  "/api/tarefas/{id}/status": {
+    patch: op("G3 · Tarefas", "Atualizar status", "tarefas.editar (responsável) ou tarefas.administrar", {
+      params: [path("id")],
+      body: { type: "object", required: ["status"], properties: { status: statusTarefa, observacao: { type: "string", maxLength: 1000, nullable: true } } },
+      bodyExample: { status: "em_andamento", observacao: "Comecei hoje." },
+      errors: [404],
+      example: { ...exemploTarefa, status: "em_andamento", historico: historicoTarefa },
+      conflictExample: erro("Tarefa já concluida."),
+      description: "Só o responsável (usuário vinculado ao colaborador responsável) ou quem tem `tarefas.administrar` (403). Grava `concluidaEm` ao concluir e uma linha no histórico imutável. Concluída e cancelada são finais (409); mesmo status é 422.",
+    }),
+  },
+  "/api/indicadores/atendimentos": {
+    get: op("G3 · Indicadores", "Indicadores de atendimentos", "modulo.dashboard (proposta)", {
+      query: periodoIndicador,
+      example: {
+        periodo: { inicio: "2026-11-01", fim: "2026-11-09", fuso: "America/Sao_Paulo" },
+        total: 120, previstos: 112, agendados: 30, realizados: 75, naoRealizados: 7, cancelados: 8, pendentesDeRegistro: 3,
+        taxaRealizacao: 91.5, taxaCancelamento: 6.7,
+        porCategoria: [{ categoria: "fisioterapia", total: 40, previstos: 38, agendados: 10, realizados: 26, naoRealizados: 2, cancelados: 2, pendentesDeRegistro: 1, taxaRealizacao: 92.9, taxaCancelamento: 5 }],
+      },
+      description: "Só números, sem dados de idoso. Fórmulas no README do Grupo 3 (US-128). Taxas em %, com uma casa; denominador zero → null.",
+    }),
+  },
+  "/api/indicadores/tarefas": {
+    get: op("G3 · Indicadores", "Indicadores de tarefas", "modulo.dashboard (proposta)", {
+      query: periodoIndicador,
+      example: {
+        periodo: { inicio: "2026-11-01", fim: "2026-11-09", fuso: "America/Sao_Paulo" },
+        agora: { abertas: 12, atrasadas: 3, taxaAtraso: 25, porPrioridade: [{ prioridade: "urgente", abertas: 1, atrasadas: 1 }] },
+        noPeriodo: { criadas: 20, concluidas: 15, concluidasNoPrazo: 12, canceladas: 1, taxaConclusaoNoPrazo: 80 },
+      },
+      description: "`agora` é a fotografia do momento; `noPeriodo` usa o período. Denominador zero → null.",
+    }),
+  },
+  "/api/indicadores/equipe": {
+    get: op("G3 · Indicadores", "Indicadores de presença da equipe", "modulo.dashboard (proposta)", {
+      query: [query("data", dataDia, "Padrão: hoje no fuso da instituição.")],
+      example: {
+        data: "2026-11-09", fuso: "America/Sao_Paulo", colaboradoresAtivos: 33, presentesNoDia: 21, ausentesNoDia: 2, presentesAgora: 14,
+        escalasNoDia: 6, escalasComPresenca: 5, taxaPresencaEscala: 83.3,
+        porVinculo: [{ vinculo: "funcionario", ativos: 25, presentes: 18, ausentes: 1 }],
+      },
+      description: "Presença é registro operacional, não controle de ponto. Denominador zero → null.",
     }),
   },
   "/api/idosos/{idosoId}/atendimentos": {

@@ -357,3 +357,34 @@ export function cargaPorDia(dias, sessoes) {
 export function taxa(parte, total) {
   return total ? Math.round((parte / total) * 1000) / 10 : null;
 }
+
+// ---------- Tarefas (US-094 a US-096) ----------
+
+export const STATUS_TAREFA = ["pendente", "em_andamento", "concluida", "cancelada"];
+export const STATUS_TAREFA_ABERTA = ["pendente", "em_andamento"];
+
+// Concluída e cancelada são finais; entre pendente e em_andamento pode ir e voltar.
+export function transicaoTarefaValida(de, para) {
+  return STATUS_TAREFA_ABERTA.includes(de) && STATUS_TAREFA.includes(para) && de !== para;
+}
+
+// Atrasada é derivado: prazo vencido e tarefa ainda aberta.
+export function tarefaAtrasada(tarefa, agora = new Date()) {
+  return STATUS_TAREFA_ABERTA.includes(tarefa.status) && ms(tarefa.prazo) < ms(agora);
+}
+
+// ---------- Notificações dos jobs (T-008) ----------
+
+/**
+ * Chave do ciclo odontológico usada para não repetir aviso: o rótulo do semestre (ex.: "2026-2") ou, em
+ * dias corridos, o mês corrente (no máximo um aviso por idoso por mês).
+ */
+export function chaveCicloOdonto(periodo, hoje) {
+  return periodo.modo === "semestre_civil" ? periodo.rotulo : `dias_corridos:${hoje.slice(0, 7)}`;
+}
+
+// Texto da notificação de pendência odontológica: só o resumo, sem nomes de idosos.
+export function textoPendenciasOdonto(quantidade, rotulo) {
+  const idosos = quantidade === 1 ? "1 idoso" : `${quantidade} idosos`;
+  return `${idosos} sem avaliação odontológica no ciclo ${rotulo}`;
+}

@@ -9,7 +9,7 @@ Backend dos épicos E07 (agenda, cuidados e atendimentos), E08 (fisioterapia), E
 | 3 | US-091, US-092, US-082, US-083, US-084, US-093 | **Entregue** |
 | 4 | US-085 a US-089 | **Entregue** |
 | 5 | US-075 a US-080 | **Entregue** |
-| 6 | US-094 a US-096 + indicadores para o Grupo 5 | A fazer |
+| 6 | US-094 a US-096 + indicadores para o Grupo 5 + jobs de alerta | **Entregue** |
 | 7 | US-081, US-090 (P2) | A fazer |
 
 As suposições e as decisões pendentes estão em [decisoes-pendentes.md](decisoes-pendentes.md).
@@ -50,7 +50,8 @@ Também dá para gravar `DATABASE_URL` no `.env`; uma variável já definida no 
 | `src/grupo3/lembretes.js` | Geração, cancelamento e envio dos lembretes (US-074) |
 | `src/grupo3/jobs.js` | Agendador dos jobs (`JOBS_ENABLED=true`), chamado por `src/server.js` |
 | `src/grupo3/auditoria.js` | Auditoria de leitura de dados clínicos |
-| `src/routes/grupo3/` | Rotas, montadas em `/api` por `index.js` (`agendamentos`, `tipos-atendimento`, `colaboradores`, `especialidades`, `escalas`, `presencas`, `clinico`, `fisioterapia`) |
+| `src/grupo3/alertas.js` | Jobs de tarefas atrasadas e de pendências odontológicas, sem notificação repetida |
+| `src/routes/grupo3/` | Rotas, montadas em `/api` por `index.js` (`agendamentos`, `tipos-atendimento`, `colaboradores`, `especialidades`, `escalas`, `presencas`, `clinico`, `fisioterapia`, `tarefas`, `indicadores`) |
 | `src/docs/openapi.grupo3.js` | OpenAPI do G3, juntado em `src/docs/openapi.js` |
 | `src/db/seedGrupo3.js` | Dados de demonstração |
 | `tests/grupo3.rules.test.js`, `tests/grupo3.api.test.js` | Testes unitários, de integração e de permissão |
@@ -88,6 +89,9 @@ erDiagram
     AGENDAMENTO ||--o{ EXECUCAO_ATIVIDADE : "sessão"
     ATIVIDADE_FISIOTERAPIA ||--o{ EXECUCAO_ATIVIDADE : "execuções"
     PLANO_FISIOTERAPIA ||--o{ EVOLUCAO_FISIOTERAPIA : "linha cronológica"
+    EXECUCAO_ATIVIDADE ||--o{ CORRECAO_EXECUCAO_ATIVIDADE : "correções"
+    COLABORADOR ||--o{ TAREFA : "responsável"
+    TAREFA ||--o{ HISTORICO_TAREFA : "status"
     USERS_public ||--o| COLABORADOR : "usuario_ref (opcional)"
     PATIENTS_public ||--o{ AGENDAMENTO : "idoso_ref"
 
@@ -223,6 +227,40 @@ erDiagram
         text publicacao_status
         text prontuario_ref
     }
+    CORRECAO_EXECUCAO_ATIVIDADE {
+        uuid id PK
+        uuid execucao_id FK
+        jsonb anterior
+        jsonb novo
+        text motivo
+        uuid autor_ref
+    }
+    TAREFA {
+        uuid id PK
+        text titulo
+        text descricao
+        uuid responsavel_id FK
+        timestamptz prazo
+        enum prioridade "baixa | media | alta | urgente"
+        enum status "pendente | em_andamento | concluida | cancelada"
+        timestamptz concluida_em
+        uuid criado_por_ref
+    }
+    HISTORICO_TAREFA {
+        uuid id PK
+        uuid tarefa_id FK
+        enum status_anterior
+        enum status_novo
+        text observacao
+        uuid autor_ref
+        timestamptz em
+    }
+    NOTIFICACAO_CONTROLE {
+        text chave PK "tarefa_atrasada:<id> | odonto_pendente:<ciclo>:<idoso_ref>"
+        text tipo
+        text status "enviada | sem_destinatario"
+        int destinatarios
+    }
     TIPO_ATENDIMENTO {
         uuid id PK
         text nome UK "único sem diferenciar maiúsculas"
@@ -323,6 +361,12 @@ Integridade garantida no banco:
 
 **Fisioterapia (US-075 a US-080).** O **plano** tem objetivo, período, frequência semanal, observações, responsável e situação; um idoso pode ter **mais de um plano ativo**. As **atividades** têm descrição, frequência, duração, intensidade e `configuracao` flexível (jsonb validado), e são inativadas em vez de excluídas. A **sessão** é um agendamento de categoria `fisioterapia` com `planoFisioterapiaId` (FK opcional): o plano precisa ser do mesmo idoso e estar ativo, e sessão fora do período do plano é aceita com o aviso `fora_do_periodo_do_plano`. A **execução de atividade** fica sempre vinculada à sessão (`agendamento_id`), uma por atividade e sessão. Só é aceita em sessão `realizado`, ou `agendado` já dentro da tolerância do tipo; sessão `cancelado` ou `nao_realizado` é 422. É imutável: a correção é `POST /api/fisioterapia/execucoes/{id}/corrigir` (`fisioterapia.administrar`, motivo obrigatório), que grava anterior → novo em `correcao_execucao_atividade` (imutável) e usa a flag local `grupo3.correcao_execucao`, como `corrigir-realizacao`. A **evolução do plano** é uma linha cronológica imutável e segue a regra de publicação do registro clínico (publica só se o autor tem `evolucao.create`; senão `aguardando_permissao`, com `POST /api/fisioterapia/evolucoes/republicar-pendentes`). A **rotina semanal** mostra as sessões da semana e a carga por dia, contando só `agendado` e `realizado`; `programar-semana` cria as sessões de um plano de uma vez, com a mesma validação do agendamento e tudo ou nada. Os **indicadores** trazem planos ativos e vigentes, idosos em fisioterapia e sessões previstas, realizadas, não realizadas e canceladas.
 
+**Tarefas (US-094 a US-096).** Tarefa com título, descrição, responsável (colaborador ativo), prazo, prioridade (`baixa`, `media`, `alta`, `urgente`) e status (`pendente`, `em_andamento`, `concluida`, `cancelada`). O **status** pode ser alterado pelo **responsável** (o usuário vinculado ao colaborador, via `usuario_ref`) ou por quem tem `tarefas.administrar`; cada mudança grava autor, data e observação no **histórico imutável** (`historico_tarefa`) e `concluida_em` ao concluir. Concluída e cancelada são finais. **Atrasada é derivado** (prazo vencido e tarefa pendente ou em andamento), não é status gravado. Os dados da tarefa são editados por quem a criou ou por `tarefas.administrar`.
+
+**Jobs de alerta (T-008).** Rodam no agendador (`JOBS_ENABLED=true`) e **não repetem notificação**: o que já foi avisado fica em `notificacao_controle`, com chave única.
+- **Tarefas atrasadas:** uma notificação por tarefa atrasada, para o usuário do responsável (`kind = "tarefa"`). Responsável sem usuário fica registrado como `sem_destinatario` e não é tentado de novo.
+- **Pendências odontológicas:** um aviso por idoso por ciclo (chave `odonto_pendente:<ciclo>:<idoso_ref>`). A cada rodada com idosos ainda não avisados, sai **um resumo sem nomes** ("5 idosos sem avaliação odontológica no ciclo 2026-2", com link para `/odontologia/pendencias?ciclo=2026-2`) para cada usuário com `atendimento-clinico.administrar` (`kind = "odontologia"`). No modo `dias_corridos`, o "ciclo" do controle é o mês corrente.
+
 **Auditoria de leitura.** Ler registro clínico, acompanhamento odontológico, tratamento externo, pendências, plano, execuções e evoluções de fisioterapia grava `<entidade>.ler` no `audit_log`, com quem acessou (`user_id`), quando (`at`), quais idosos (`payload.idosos`), quais registros e a rota.
 
 **LGPD.** Nas categorias clínicas (consultas, avaliação e fisioterapia), `observacoes`, `motivoStatus` e `observacaoRealizacao` voltam `null`, com `conteudoRestrito: true`, para quem não tem `atendimento-clinico.visualizar` (consultas e avaliação) ou `fisioterapia.visualizar`. A exceção é o próprio profissional do agendamento. A trilha de histórico aplica a mesma regra.
@@ -388,6 +432,11 @@ A documentação completa, com exemplos e erros, está em `/api/docs`.
 | `POST /api/fisioterapia/planos/{id}/programar-semana` | `fisioterapia.criar` e `agenda.criar` | 079 |
 | `GET /api/fisioterapia/rotina-semanal?semana&profissionalId` | `fisioterapia.visualizar` | 079 |
 | `GET /api/fisioterapia/indicadores?inicio&fim` | `fisioterapia.visualizar` | 080 |
+| `GET /api/tarefas?responsavelId&status&prioridade&atrasadas&prazoAte&q` · `GET /api/tarefas/{id}` · `GET /api/me/tarefas` | `tarefas.visualizar` | 094, 096 |
+| `POST /api/tarefas` | `tarefas.criar` | 094 |
+| `PUT /api/tarefas/{id}` | `tarefas.criar` (quem criou) ou `tarefas.administrar` | 094 |
+| `PATCH /api/tarefas/{id}/status` | `tarefas.editar` (responsável) ou `tarefas.administrar` | 095 |
+| `GET /api/indicadores/atendimentos` · `/tarefas` · `/equipe` | `modulo.dashboard` (proposta; pergunta ao G5) | 080, 096, 100, 119, 123, 128 |
 | `GET /api/especialidades` · `GET /api/especialidades/{id}` | `equipe.visualizar`, `equipe.administrar`, `agenda.visualizar`, `agenda.criar` ou `atendimento-clinico.visualizar` | 082, 084 |
 | `POST /api/especialidades` · `PUT /api/especialidades/{id}` · `PATCH /api/especialidades/{id}/status` | `equipe.administrar` | 082, 084 |
 | `GET /api/colaboradores/{id}/disponibilidades` | `equipe.visualizar`, `agenda.criar` ou `agenda.editar` | 082, 092 |
@@ -445,6 +494,7 @@ Usa a auditoria da Fundação (`public.audit_log`, via `audit()` em `src/db/help
 | `registro_clinico.criar` · `criar_finalizado` · `editar` · `finalizar` · `adendo` · `republicar` | Registro clínico |
 | `acompanhamento_odontologico.criar` · `editar` · `tratamento_externo.criar` · `editar` · `odontologia.configuracao_ciclo` | Atendimento odontológico e externo |
 | `plano_fisioterapia.criar` · `editar` · `atividade_fisioterapia.criar` · `editar` · `execucao_atividade.registrar` · `corrigir` · `evolucao_fisioterapia.registrar` · `republicar` | Fisioterapia |
+| `tarefa.criar` · `editar` · `status` | Tarefas (o histórico de status fica também em `historico_tarefa`) |
 | `registro_clinico.ler` · `acompanhamento_odontologico.ler` · `tratamento_externo.ler` · `odontologia_pendencias.ler` · `plano_fisioterapia.ler` · `execucao_atividade.ler` · `evolucao_fisioterapia.ler` | **Leitura** de dados clínicos: usuário, data/hora, idosos (`payload.idosos`), registros e rota |
 | `escala.criar` · `editar` · `situacao` | Alterações em escalas |
 | `escala.cobertura` | Substituição da cobertura mínima (com a versão anterior) |
@@ -460,4 +510,57 @@ Usa a auditoria da Fundação (`public.audit_log`, via `audit()` em `src/db/help
 | Prontuário — linha do tempo (G1, US-030) | `src/grupo3/portas/prontuario.js` | Não existe; `TODO(integracao-G1)` | Quando existir, publicar também nela |
 | Notificações (G4, US-117) | `src/grupo3/portas/notificacoes.js` | Adaptador real do canal interno sobre `public.notifications`; `TODO(integracao-G4)` para o serviço do Grupo 4 | `enviarNotificacao({ usuarioId, titulo, corpo, link }, db) → { status: "enviado" \| "entregue", canal, referencia }`. Exceção = falha (o job tenta de novo) |
 | Jobs (T-008) | `src/grupo3/jobs.js` | Agendador no processo, ligado por `JOBS_ENABLED=true` | `iniciarJobs({ intervaloSeg, jobs })` e `pararJobs()` (chamado no `SIGTERM`/`SIGINT` de `src/server.js`). Cada rodada tem try/catch com log sem dados sensíveis; se a anterior de um job ainda está rodando, a nova é pulada. `processarLembretes({ agora, limite, enviar })` também pode ser chamado direto |
-| Indicadores (G5) | — | Fatia 6 | `GET /api/indicadores/atendimentos \| tarefas \| equipe` |
+| Indicadores (G5) | `src/routes/grupo3/indicadores.js` | Entregue | `GET /api/indicadores/atendimentos \| tarefas \| equipe` (só números) e `GET /api/fisioterapia/indicadores`. Definições na seção "Indicadores para o Grupo 5" |
+
+## Indicadores para o Grupo 5 (US-128)
+
+Todos os indicadores são **só números**: não trazem nome nem identificador de idoso. **Taxas** são percentuais com uma casa decimal e valem **`null` quando o denominador é zero** (nunca 0). Datas e períodos usam o **fuso da instituição** (`grupo3.configuracao.fuso_horario`, padrão `America/Sao_Paulo`); o período `[inicio, fim]` vai de `inicio` 00:00 até o fim do dia `fim`, no horário local. A permissão de leitura proposta é `modulo.dashboard` (a mesma do `/api/dashboard`), ainda como pergunta ao G5.
+
+### `GET /api/indicadores/atendimentos?inicio&fim`
+
+Período padrão: do primeiro dia do mês corrente até hoje. Agendamentos com **início** dentro do período, no total e por categoria do tipo.
+
+| Indicador | Fórmula |
+|---|---|
+| `total` | agendamentos com início no período |
+| `agendados` · `realizados` · `naoRealizados` · `cancelados` | contagem por status atual |
+| `previstos` | `total − cancelados` |
+| `pendentesDeRegistro` | status `agendado` e fim já passou (agora) |
+| `taxaRealizacao` | `realizados ÷ (realizados + naoRealizados) × 100` |
+| `taxaCancelamento` | `cancelados ÷ total × 100` |
+| `porCategoria[]` | os mesmos números por categoria (`consulta_medica`, `fisioterapia`, `cuidado_pessoal`...) |
+
+### `GET /api/indicadores/tarefas?inicio&fim`
+
+Período padrão: do primeiro dia do mês corrente até hoje.
+
+| Indicador | Fórmula | Referência de tempo |
+|---|---|---|
+| `agora.abertas` | tarefas `pendente` ou `em_andamento` | agora (ignora o período) |
+| `agora.atrasadas` | abertas com prazo < agora | agora |
+| `agora.taxaAtraso` | `atrasadas ÷ abertas × 100` | agora |
+| `agora.porPrioridade[]` | abertas e atrasadas por prioridade | agora |
+| `noPeriodo.criadas` | criadas no período | período |
+| `noPeriodo.concluidas` | `concluida_em` no período | período |
+| `noPeriodo.concluidasNoPrazo` | concluídas no período com `concluida_em ≤ prazo` | período |
+| `noPeriodo.canceladas` | mudanças para `cancelada` no período (histórico) | período |
+| `noPeriodo.taxaConclusaoNoPrazo` | `concluidasNoPrazo ÷ concluidas × 100` | período |
+
+### `GET /api/indicadores/equipe?data`
+
+Data padrão: hoje.
+
+| Indicador | Fórmula |
+|---|---|
+| `colaboradoresAtivos` · `porVinculo[].ativos` | colaboradores com status `ativo` (agora), total e por vínculo |
+| `presentesNoDia` · `ausentesNoDia` | presenças `presente` / `ausente` com `data` = dia |
+| `presentesAgora` | presenças `presente` sem saída registrada (agora, qualquer data) |
+| `escalasNoDia` | escalas não canceladas com início no dia |
+| `escalasComPresenca` | dessas, as que têm presença `presente` ligada |
+| `taxaPresencaEscala` | `escalasComPresenca ÷ escalasNoDia × 100` |
+
+A presença é registro operacional e **não substitui o controle de ponto**.
+
+### `GET /api/fisioterapia/indicadores?inicio&fim` (US-080)
+
+Período padrão: do primeiro dia do mês corrente até hoje. `planos.ativos` = situação `ativo` e hoje dentro do período do plano; `planos.idososEmFisioterapia` = idosos distintos com plano ativo; sessões de categoria `fisioterapia` com início no período: `previstas` = não canceladas, `taxaRealizacao` = `realizadas ÷ (realizadas + naoRealizadas) × 100`.
