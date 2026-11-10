@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  periodoAte12Meses,
+  somarMeses,
   chaveCicloOdonto,
   tarefaAtrasada,
   textoPendenciasOdonto,
@@ -361,5 +363,18 @@ describe("grupo3 · tarefas e alertas (US-095, US-096, T-008)", () => {
   it("chave do ciclo para não repetir aviso", () => {
     assert.equal(chaveCicloOdonto({ modo: "semestre_civil", rotulo: "2026-2" }, "2026-11-09"), "2026-2");
     assert.equal(chaveCicloOdonto({ modo: "dias_corridos", rotulo: "180 dias até 2026-11-09" }, "2026-11-09"), "dias_corridos:2026-11");
+  });
+});
+
+describe("grupo3 · período dos relatórios (US-081, US-090)", () => {
+  it("até 12 meses: de 2025-01-01 vai no máximo até 2025-12-31", () => {
+    assert.equal(periodoAte12Meses("2025-01-01", "2025-12-31"), true);
+    assert.equal(periodoAte12Meses("2025-01-01", "2026-01-01"), false);
+    assert.equal(periodoAte12Meses("2025-03-10", "2025-03-01"), false);
+  });
+
+  it("soma de meses respeita o fim do mês", () => {
+    assert.equal(somarMeses("2024-02-29", 12), "2025-02-28");
+    assert.equal(somarMeses("2025-01-31", 1), "2025-02-28");
   });
 });

@@ -388,3 +388,19 @@ export function textoPendenciasOdonto(quantidade, rotulo) {
   const idosos = quantidade === 1 ? "1 idoso" : `${quantidade} idosos`;
   return `${idosos} sem avaliação odontológica no ciclo ${rotulo}`;
 }
+
+// ---------- Relatórios (US-081, US-090) ----------
+
+// Mesma data, N meses depois (dia limitado ao fim do mês).
+export function somarMeses(data, meses) {
+  const [ano, mes, diaDoMes] = data.split("-").map(Number);
+  const alvo = new Date(Date.UTC(ano, mes - 1 + meses, 1));
+  const ultimoDia = new Date(Date.UTC(alvo.getUTCFullYear(), alvo.getUTCMonth() + 1, 0)).getUTCDate();
+  alvo.setUTCDate(Math.min(diaDoMes, ultimoDia));
+  return alvo.toISOString().slice(0, 10);
+}
+
+// Período de até 12 meses: de 2025-01-01 vai no máximo até 2025-12-31.
+export function periodoAte12Meses(inicio, fim) {
+  return fim >= inicio && fim < somarMeses(inicio, 12);
+}

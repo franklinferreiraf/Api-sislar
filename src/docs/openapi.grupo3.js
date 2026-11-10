@@ -462,6 +462,12 @@ const periodoIndicador = [
   query("fim", dataDia, "Padrão: hoje (fuso da instituição)."),
 ];
 
+const periodoRelatorio = [
+  query("inicio", dataDia, "Padrão: primeiro dia do mês corrente (fuso da instituição)."),
+  query("fim", dataDia, "Padrão: hoje. No máximo 12 meses depois do início (422 acima disso)."),
+];
+const periodo12 = "Período máximo de 12 meses (ex.: de 2025-01-01 até 2025-12-31); acima disso, 422.";
+
 const lgpd = "Em consultas, fisioterapia e avaliações, `observacoes`, `motivoStatus` e `observacaoRealizacao` voltam `null` "
   + "com `conteudoRestrito: true` para quem não tem a permissão clínica (`atendimento-clinico.visualizar` ou "
   + "`fisioterapia.visualizar`), exceto o próprio profissional do agendamento.";
@@ -475,6 +481,7 @@ export const tagsGrupo3 = [
   { name: "G3 · Fisioterapia", description: "US-075 a US-080. Planos, atividades, execução por sessão, evolução, rotina semanal e indicadores. Sessão = agendamento de categoria fisioterapia com `planoFisioterapiaId`. Leitura auditada." },
   { name: "G3 · Tarefas", description: "US-094 a US-096. Tarefas da equipe, status com histórico imutável e atrasadas (derivado)." },
   { name: "G3 · Indicadores", description: "Leitura agregada para o dashboard do Grupo 5 (US-119, US-123, US-100, US-128). Só números." },
+  { name: "G3 · Relatórios", description: "US-081 e US-090 (P2). Endpoints JSON com filtros e paginação; a exportação (PDF/planilha) fica com o Grupo 5. Período máximo de 12 meses." },
   { name: "G3 · Atendimento clínico", description: "US-085 a US-089. Registro clínico de consulta (rascunho → finalizado, correção por adendo), acompanhamento odontológico, tratamento externo e pendências do ciclo. Toda leitura é auditada." },
 ];
 
@@ -1331,6 +1338,48 @@ export const pathsGrupo3 = {
         porVinculo: [{ vinculo: "funcionario", ativos: 25, presentes: 18, ausentes: 1 }],
       },
       description: "Presença é registro operacional, não controle de ponto. Denominador zero → null.",
+    }),
+  },
+  "/api/fisioterapia/relatorios/evolucao": {
+    get: op("G3 · Relatórios", "Relatório de evolução da fisioterapia (US-081)", "fisioterapia.visualizar", {
+      query: [...pagina, ...periodoRelatorio, query("idosoId", idosoId), query("planoId", uuid)],
+      errors: [404],
+      example: {
+        periodo: { inicio: "2026-11-01", fim: "2026-11-09" },
+        data: [{
+          plano: { id: exemploPlano.id, objetivo: exemploPlano.objetivo, dataInicio: "2026-10-10", dataFim: null, frequenciaSemanal: 2, situacao: "ativo", responsavel: exemploPlano.responsavel },
+          idoso: { id: "p02", nome: "Antônio Pereira" },
+          sessoes: { total: 6, agendadas: 1, realizadas: 4, naoRealizadas: 0, canceladas: 1, taxaRealizacao: 100 },
+          atividades: [{ id: exemploAtividade.id, descricao: exemploAtividade.descricao, ativa: true, execucoes: { realizada: 3, parcial: 1, naoRealizada: 0, total: 4 } }],
+          evolucoes: [{ id: "e1", registradoEm: "2026-11-05T17:50:00.000Z", agendamentoId: exemploAgendamento.id, texto: "Caminhou 20 m com andador sem dor.", autor: { id: "s06", nome: "Renata Gouveia" } }],
+        }],
+        meta: { page: 1, limit: 20, total: 1, pages: 1 },
+      },
+      description: `Consolida, por plano cujo período toca o período do relatório: dados do plano, sessões (realizadas, não realizadas, canceladas, agendadas), execuções por atividade e evoluções no período. Paginado por plano. ${periodo12} ${leituraAuditada}`,
+    }),
+  },
+  "/api/relatorios/consultas-tratamentos": {
+    get: op("G3 · Relatórios", "Relatório de consultas e tratamentos (US-090)", "atendimento-clinico.visualizar ou modulo.relatorios", {
+      query: [
+        ...pagina, ...periodoRelatorio,
+        query("area", { type: "string", enum: ["medica", "odontologica"] }),
+        query("profissionalId", uuid, "Só consultas: tratamento externo não tem colaborador."),
+        query("idosoId", idosoId),
+        query("status", { type: "string", enum: ["agendado", "realizado", "nao_realizado", "cancelado"] }, "Tratamento externo conta como realizado."),
+        query("incluirConteudo", { type: "boolean", default: false }, "Exige atendimento-clinico.visualizar (403)."),
+      ],
+      errors: [404],
+      example: {
+        periodo: { inicio: "2026-11-01", fim: "2026-11-09" },
+        filtros: { area: null, profissionalId: null, idosoId: null, status: null, incluirConteudo: false },
+        resumo: { consultas: 2, tratamentosExternos: 1, porStatus: { realizado: 2, cancelado: 1 } },
+        data: [
+          { origem: "consulta", id: exemploAgendamento.id, data: "2026-11-05T12:00:00.000Z", idoso: { id: "p09", nome: "José Almeida" }, area: "medica", tipo: "Consulta médica", status: "realizado", profissional: { id: exemploColaborador.id, nome: "Dr. Paulo Ferraz Neto" } },
+          { origem: "tratamento_externo", id: exemploTratamento.id, data: "2026-11-03T03:00:00.000Z", idoso: { id: "p05", nome: "Ana Souza" }, area: "odontologica", tipo: "Extração dentária", status: "realizado", profissional: null },
+        ],
+        meta: { page: 1, limit: 20, total: 2, pages: 1 },
+      },
+      description: `Consultas (agendamentos de consulta médica ou odontológica) e tratamentos externos no período, do mais recente ao mais antigo. **Por padrão, só metadados** (data, idoso, profissional, tipo, status). Com \`incluirConteudo=true\` (só com \`atendimento-clinico.visualizar\`), cada item traz \`conteudo\`: local e registro clínico da consulta, ou local externo, instituição e observações do tratamento. ${periodo12} ${leituraAuditada}`,
     }),
   },
   "/api/idosos/{idosoId}/atendimentos": {

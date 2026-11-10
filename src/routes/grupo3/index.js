@@ -9,6 +9,7 @@ import especialidadesRouter from "./especialidades.js";
 import fisioterapiaRouter from "./fisioterapia.js";
 import indicadoresRouter from "./indicadores.js";
 import presencasRouter from "./presencas.js";
+import relatoriosRouter from "./relatorios.js";
 import tarefasRouter from "./tarefas.js";
 import tiposAtendimentoRouter from "./tipos-atendimento.js";
 
@@ -26,5 +27,6 @@ router.use(clinicoRouter);
 router.use(fisioterapiaRouter);
 router.use(tarefasRouter);
 router.use(indicadoresRouter);
+router.use(relatoriosRouter);
 
 export default router;

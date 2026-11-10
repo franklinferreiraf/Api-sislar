@@ -82,6 +82,7 @@ describe("grupo3 · documentação", () => {
       "/api/tratamentos-externos", "/api/odontologia/pendencias",
       "/api/fisioterapia/planos", "/api/fisioterapia/rotina-semanal", "/api/fisioterapia/indicadores", "/api/fisioterapia/planos/{id}/evolucoes",
       "/api/tarefas", "/api/me/tarefas", "/api/indicadores/atendimentos", "/api/indicadores/tarefas", "/api/indicadores/equipe",
+      "/api/fisioterapia/relatorios/evolucao", "/api/relatorios/consultas-tratamentos",
     ]) {
       assert.ok(spec.paths[rota]?.get, rota);
     }
@@ -1763,5 +1764,120 @@ describe("grupo3 · indicadores para o Grupo 5", () => {
       assert.equal((await get("recepcao", `/api/indicadores/${rota}`)).status, 403, rota);
       assert.equal((await get("admin", `/api/indicadores/${rota}`)).status, 200, rota);
     }
+  });
+});
+
+// ---------------- Fatia 7 ----------------
+
+describe("grupo3 · relatório de evolução da fisioterapia (US-081)", () => {
+  let plano;
+
+  before(async () => {
+    const renata = await colaboradorPorNome("Renata Gouveia");
+    const sessaoTipo = await tipoPorNome("Sessão de fisioterapia");
+    plano = (await post("fisio", "/api/fisioterapia/planos", {
+      idosoId: "p18", responsavelId: renata, objetivo: "Reabilitação pós-queda.", dataInicio: "2025-04-01", frequenciaSemanal: 3,
+    })).body.id;
+    const atividade = (await post("fisio", `/api/fisioterapia/planos/${plano}/atividades`, { descricao: "Treino de transferência" })).body.id;
+    const sessao = async (inicio) => (await post("recepcao", "/api/agendamentos", {
+      idosoId: "p18", tipoId: sessaoTipo, profissionalId: renata, inicio, planoFisioterapiaId: plano,
+    })).body.id;
+    const feita = await sessao("2025-04-07T09:00:00-03:00");
+    await post("recepcao", `/api/agendamentos/${feita}/realizacao`, { status: "realizado" });
+    await post("fisio", `/api/fisioterapia/atividades/${atividade}/execucoes`, { agendamentoId: feita, status: "realizada" });
+    const faltou = await sessao("2025-04-09T09:00:00-03:00");
+    await post("recepcao", `/api/agendamentos/${faltou}/realizacao`, { status: "nao_realizado", observacao: "Recusou" });
+    const cancelada = await sessao("2025-04-11T09:00:00-03:00");
+    await post("recepcao", `/api/agendamentos/${cancelada}/cancelar`, { motivo: "Consulta externa no horário" });
+    await post("fisio", `/api/fisioterapia/planos/${plano}/evolucoes`, { texto: "Transferência cama-cadeira com supervisão." });
+  });
+
+  it("consolida plano, atividades, sessões e evoluções no período", async () => {
+    const abril = await get("fisio", `/api/fisioterapia/relatorios/evolucao?inicio=2025-04-01&fim=2025-04-30&idosoId=p18`);
+    assert.equal(abril.status, 200);
+    assert.deepEqual(abril.body.periodo, { inicio: "2025-04-01", fim: "2025-04-30" });
+    const item = abril.body.data.find((d) => d.plano.id === plano);
+    assert.equal(item.idoso.id, "p18");
+    assert.deepEqual(item.sessoes, { total: 3, agendadas: 0, realizadas: 1, naoRealizadas: 1, canceladas: 1, taxaRealizacao: 50 });
+    assert.equal(item.atividades[0].execucoes.realizada, 1);
+    assert.equal(item.atividades[0].execucoes.total, 1);
+    assert.deepEqual(item.evolucoes, []);
+    const agora = await get("fisio", `/api/fisioterapia/relatorios/evolucao?planoId=${plano}`);
+    const atual = agora.body.data[0];
+    assert.equal(atual.sessoes.total, 0);
+    assert.equal(atual.sessoes.taxaRealizacao, null);
+    assert.equal(atual.evolucoes.length, 1);
+    assert.equal(atual.evolucoes[0].autor.id, "s06");
+  });
+
+  it("período máximo de 12 meses, permissão e leitura auditada", async () => {
+    assert.equal((await get("fisio", "/api/fisioterapia/relatorios/evolucao?inicio=2025-01-01&fim=2025-12-31&idosoId=p18")).status, 200);
+    assert.equal((await get("fisio", "/api/fisioterapia/relatorios/evolucao?inicio=2025-01-01&fim=2026-01-01&idosoId=p18")).status, 422);
+    assert.equal((await get("recepcao", "/api/fisioterapia/relatorios/evolucao")).status, 403);
+    assert.ok(await leituraAuditada("relatorio_fisioterapia.ler", "s06", "p18") >= 1);
+  });
+});
+
+describe("grupo3 · relatório de consultas e tratamentos (US-090)", () => {
+  let paulo;
+
+  before(async () => {
+    paulo = await colaboradorPorNome("Dr. Paulo Ferraz Neto");
+    const luciana = await colaboradorPorNome("Dra. Luciana Prado");
+    const medica = (await post("recepcao", "/api/agendamentos", {
+      idosoId: "p19", tipoId: await tipoPorNome("Consulta médica"), profissionalId: paulo, local: "Consultório 1",
+      inicio: "2025-05-05T09:00:00-03:00",
+    })).body.id;
+    await post("recepcao", `/api/agendamentos/${medica}/realizacao`, { status: "realizado" });
+    await post("medico", `/api/agendamentos/${medica}/registro-clinico`, { resumo: "Pressão controlada com a medicação atual.", finalizar: true });
+    const odonto = (await post("recepcao", "/api/agendamentos", {
+      idosoId: "p19", tipoId: await tipoPorNome("Consulta odontológica"), profissionalId: luciana, local: "Consultório odontológico",
+      inicio: "2025-05-06T14:00:00-03:00",
+    })).body.id;
+    await post("recepcao", `/api/agendamentos/${odonto}/cancelar`, { motivo: "Idoso internado" });
+    await post("medico", "/api/tratamentos-externos", {
+      idosoId: "p19", area: "odontologica", tipo: "Restauração", localExterno: "CEO", data: "2025-05-10", observacoes: "Dente 36.",
+    });
+  });
+
+  const url = (extra = "") => `/api/relatorios/consultas-tratamentos?inicio=2025-05-01&fim=2025-05-31&idosoId=p19${extra}`;
+
+  it("por padrão só metadados (data, idoso, profissional, tipo, status)", async () => {
+    const resposta = await get("gestor", url());
+    assert.equal(resposta.status, 200);
+    assert.equal(resposta.body.data.length, 3);
+    assert.deepEqual(resposta.body.resumo, { consultas: 2, tratamentosExternos: 1, porStatus: { realizado: 2, cancelado: 1 } });
+    for (const item of resposta.body.data) {
+      assert.deepEqual(Object.keys(item).sort(), ["area", "data", "id", "idoso", "origem", "profissional", "status", "tipo"]);
+    }
+    const texto = JSON.stringify(resposta.body);
+    assert.ok(!texto.includes("Pressão controlada") && !texto.includes("Dente 36"));
+  });
+
+  it("conteúdo clínico só com atendimento-clinico.visualizar e pedido explícito", async () => {
+    const comConteudo = await get("odonto", url("&incluirConteudo=true"));
+    assert.equal(comConteudo.status, 200);
+    const consulta = comConteudo.body.data.find((d) => d.origem === "consulta" && d.status === "realizado");
+    assert.equal(consulta.conteudo.registroClinico.resumo, "Pressão controlada com a medicação atual.");
+    const tratamento = comConteudo.body.data.find((d) => d.origem === "tratamento_externo");
+    assert.equal(tratamento.conteudo.observacoes, "Dente 36.");
+    assert.equal((await get("recepcao", url())).status, 403);
+    assert.equal((await get("fisio", url())).status, 403);
+  });
+
+  it("filtros por área, profissional e status; tratamento externo não tem profissional cadastrado", async () => {
+    const odonto = await get("gestor", url("&area=odontologica"));
+    assert.equal(odonto.body.data.length, 2);
+    assert.ok(odonto.body.data.every((d) => d.area === "odontologica"));
+    const doPaulo = await get("gestor", url(`&profissionalId=${paulo}`));
+    assert.deepEqual(doPaulo.body.data.map((d) => [d.origem, d.profissional.nome]), [["consulta", "Dr. Paulo Ferraz Neto"]]);
+    const canceladas = await get("gestor", url("&status=cancelado"));
+    assert.deepEqual(canceladas.body.data.map((d) => d.tipo), ["Consulta odontológica"]);
+  });
+
+  it("período máximo de 12 meses e leitura auditada", async () => {
+    assert.equal((await get("gestor", "/api/relatorios/consultas-tratamentos?inicio=2024-06-01&fim=2025-06-01")).status, 422);
+    assert.equal((await get("gestor", "/api/relatorios/consultas-tratamentos?inicio=2024-06-02&fim=2025-06-01")).status, 200);
+    assert.ok(await leituraAuditada("relatorio_consultas_tratamentos.ler", "s02", "p19") >= 1);
   });
 });
